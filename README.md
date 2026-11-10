@@ -157,6 +157,22 @@ python build_exe.py                :: 生成 dist\我爱截图\我爱截图.exe
 python src\main.py
 ```
 
+## 在 GitHub 上自动打包
+
+仓库里的 `.github/workflows/build.yml` 会在 GitHub 的 Windows 机器上跑完整打包流程
+（PyInstaller + Inno Setup），产物直接下载，不用本地装环境。
+
+两种触发方式：
+
+| 方式 | 操作 | 结果 |
+| --- | --- | --- |
+| 手动 | Actions → **构建 Windows 安装包** → `Run workflow`，可填版本号（如 `1.1.0`，留空则沿用 `installer.iss` 里的） | 构建完在页面底部 Artifacts 下载 `installer`（安装包）和 `portable`（免安装目录） |
+| 打 tag | `git tag v1.1.0 && git push origin v1.1.0` | 自动构建并建 Release，安装包作为附件挂上去 |
+
+版本号会同步写进两个地方：`installer.iss` 的 `MyAppVersion`（由
+`tools/ci_set_version.py` 改）和 exe 的文件属性（`build_exe.py` 读环境变量
+`APP_VERSION`）。本地打包不设这个变量，默认仍是 `1.0.0`。
+
 ## 署名徽标
 
 主界面底部的 `by tiamma` 现在用的是**纯字版**设计图（透明底 + 银色渐变字，

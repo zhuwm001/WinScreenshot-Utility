@@ -11,12 +11,30 @@ ASSETS = os.path.join(ROOT, "assets")
 WORK = os.path.join(ROOT, "build", "pyi")
 DIST = os.path.join(ROOT, "dist")
 APP_NAME = "我爱截图"
-VERSION = "1.0.0"
+# 版本号可用环境变量 APP_VERSION 覆盖（CI 里按 tag 传入），默认 1.0.0
+VERSION = (os.environ.get("APP_VERSION") or "1.0.0").strip()
+
+
+def _version_parts(text):
+    """把 1.2.3 / v1.2.3 这类型号拆成三个整数，缺的补 0。"""
+    parts = []
+    for piece in text.replace("-", ".").replace("_", ".").split("."):
+        if piece.isdigit():
+            parts.append(int(piece))
+            if len(parts) == 3:
+                break
+    while len(parts) < 3:
+        parts.append(0)
+    return parts
+
+
+_V1, _V2, _V3 = _version_parts(VERSION)
+V4 = "%d.%d.%d.0" % (_V1, _V2, _V3)
 
 VERSION_FILE = r"""VSVersionInfo(
   ffi=FixedFileInfo(
-    filevers=(1, 0, 0, 0),
-    prodvers=(1, 0, 0, 0),
+    filevers=(%(a)d, %(b)d, %(c)d, 0),
+    prodvers=(%(a)d, %(b)d, %(c)d, 0),
     mask=0x3f,
     flags=0x0,
     OS=0x40004,
@@ -30,19 +48,20 @@ VERSION_FILE = r"""VSVersionInfo(
         '080404B0',
         [StringStruct('CompanyName', 'WoAiJieTu'),
          StringStruct('FileDescription', '我爱截图 - Windows 截图工具'),
-         StringStruct('FileVersion', '1.0.0.0'),
+         StringStruct('FileVersion', '%(v4)s'),
          StringStruct('InternalName', 'WoAiJieTu'),
          StringStruct('OriginalFilename', 'WoAiJieTu.exe'),
          StringStruct('ProductName', '我爱截图'),
-         StringStruct('ProductVersion', '1.0.0.0')])
+         StringStruct('ProductVersion', '%(v4)s')])
     ]),
     VarFileInfo([VarStruct('Translation', [2052, 1200])])
   ]
 )
-"""
+""" % {"a": _V1, "b": _V2, "c": _V3, "v4": V4}
 
 
 def main():
+    print("版本:", VERSION)
     os.makedirs(WORK, exist_ok=True)
     vfile = os.path.join(WORK, "version_info.txt")
     with open(vfile, "w", encoding="utf-8") as f:
