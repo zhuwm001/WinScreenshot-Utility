@@ -1,0 +1,30 @@
+# ---------- Python ----------
+__pycache__/
+*.py[cod]
+*.pyd
+.venv/
+venv/
+venv-win/
+
+# ---------- 构建产物（体积大，不入库） ----------
+build/
+dist/
+*.spec
+!build_exe.py
+
+# 打包出来的安装包走 GitHub Releases，不进仓库
+installer/*.exe
+installer/*.zip
+
+# ---------- 本地数据 / 临时文件 ----------
+.workbuddy/
+*.log
+*.tmp
+*.bak
+build/.ghtoken
+
+# ---------- 编辑器 / 系统 ----------
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
