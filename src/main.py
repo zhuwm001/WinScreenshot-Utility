@@ -13,10 +13,10 @@ import autostart
 from app_config import APP_NAME, APP_VERSION, config
 from hotkey import HotkeyManager, normalize_sequence
 from main_window import MainWindow
-from overlay import CaptureOverlay
+from overlay import CaptureSession
 from paths import asset
 from pin_window import PinWindow
-from screenshot import grab_virtual_desktop, patch_region
+from screenshot import capture_desktop, set_process_dpi_awareness
 from settings_dialog import SettingsDialog
 from toast import Toast
 
@@ -187,7 +187,8 @@ class AppController(QObject):
         #    钩子把组合键"吞掉"了，前台程序根本收不到那几个键，菜单不会因为
         #    截图快捷键而收起（前提是快捷键里不含 Alt —— Alt 一按下，
         #    系统层面就会把别人的菜单收起来，这点在设置里已提示用户）。
-        shot, vgeo = grab_virtual_desktop()
+        #    逐屏抓：两块屏缩放比例不同时，这样才不会有一块屏是黑的。
+        desk = capture_desktop()
 
         self._restore_main = self.win.isVisible()
         self._hide_rect = QRect()
@@ -197,26 +198,26 @@ class AppController(QObject):
             self._hide_rect = QRect(self.win.frameGeometry())
             self.win.hide()
             # 等窗口真正从合成器上撤走（约两帧），再只补抓这一块
-            QTimer.singleShot(120, lambda: self._open_overlay(shot, vgeo))
+            QTimer.singleShot(120, lambda: self._open_overlay(desk))
         else:
-            QTimer.singleShot(0, lambda: self._open_overlay(shot, vgeo))
+            QTimer.singleShot(0, lambda: self._open_overlay(desk))
 
     def _release_guard(self):
         self._capture_guard = False
 
-    def _open_overlay(self, shot=None, vgeo=None):
-        if shot is not None and not shot.isNull() and not self._hide_rect.isNull():
-            patch_region(shot, vgeo, self._hide_rect)
+    def _open_overlay(self, desk=None):
+        if desk is not None and not self._hide_rect.isNull():
+            desk.patch(self._hide_rect)
         self._hide_rect = QRect()
 
-        self.overlay = CaptureOverlay(config.get("pen_color"),
-                                     config.get("text_size"),
-                                     config.get("text_bold"),
-                                     shot=shot, vgeo=vgeo)
+        self.overlay = CaptureSession(desk,
+                                      config.get("pen_color"),
+                                      config.get("text_size"),
+                                      config.get("text_bold"))
         self.overlay.finished.connect(self._on_capture_done)
         self.overlay.cancelled.connect(self._on_capture_cancelled)
         self.overlay.pinned.connect(self._on_pinned)
-        self.overlay.destroyed.connect(self._on_overlay_destroyed)
+        self.overlay.closed.connect(self._on_overlay_destroyed)
         self.overlay.show_overlay()
 
     def _on_overlay_destroyed(self, *_):
@@ -238,7 +239,7 @@ class AppController(QObject):
         self._persist_text_style()
         self.overlay = None
         self._restore_main_window()
-        pin = PinWindow(image, screen_pos, self._screen_dpr())
+        pin = PinWindow(image, screen_pos, self._screen_dpr_at(screen_pos))
         pin.show()
 
     def _persist_text_style(self):
@@ -258,6 +259,12 @@ class AppController(QObject):
     @staticmethod
     def _screen_dpr() -> float:
         screen = QApplication.primaryScreen()
+        return float(screen.devicePixelRatio()) if screen else 1.0
+
+    @staticmethod
+    def _screen_dpr_at(pos) -> float:
+        """这块屏幕自己的缩放比例 —— 贴图窗口要按它换算回逻辑尺寸。"""
+        screen = QApplication.screenAt(pos) or QApplication.primaryScreen()
         return float(screen.devicePixelRatio()) if screen else 1.0
 
     def _restore_main_window(self):
@@ -290,8 +297,19 @@ class AppController(QObject):
 
 
 def main():
+    # 必须最先做：让进程按物理像素工作。多显示器（尤其两块屏缩放比例不同）时，
+    # 不声明 DPI 感知的话系统会虚拟化坐标，第二块屏抓出来是一整块黑。
+    set_process_dpi_awareness()
+
     QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
     QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
+    # 缩放比例别四舍五入：Windows 设 150% 时 Qt 默认会按 200% 画，界面比别的
+    # 程序大一圈，而且抓图比例算错。PassThrough = 跟系统一致。
+    try:
+        QApplication.setHighDpiScaleFactorRoundingPolicy(
+            Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
+    except Exception:
+        pass
 
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)

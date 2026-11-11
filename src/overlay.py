@@ -3,7 +3,7 @@
 import math
 
 from PyQt5.QtCore import (
-    QEvent, QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer, pyqtSignal,
+    QEvent, QObject, QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer, pyqtSignal,
 )
 from PyQt5.QtGui import (
     QColor, QFont, QFontMetrics, QImage, QPainter, QPainterPath, QPen, QPixmap,
@@ -15,7 +15,7 @@ from PyQt5.QtWidgets import (
 )
 
 import icons
-from screenshot import grab_virtual_desktop, virtual_geometry
+from screenshot import (capture_desktop, grab_virtual_desktop, virtual_geometry)
 from winutil import force_foreground
 
 # 状态
@@ -476,9 +476,10 @@ class CaptureOverlay(QWidget):
     finished = pyqtSignal(object)      # QImage，已复制到剪贴板
     pinned = pyqtSignal(object, object)  # QImage, 屏幕坐标 QPoint
     cancelled = pyqtSignal()
+    activated = pyqtSignal()           # 用户在这块遮罩上按了鼠标（多屏时用来清掉别的屏的选区）
 
     def __init__(self, pen_color="#FF3B30", text_size=FONT_DEFAULT, text_bold=False,
-                 shot=None, vgeo=None):
+                 shot=None, vgeo=None, show_hint=True):
         super().__init__(None)
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint
                             | Qt.Tool | Qt.NoDropShadowWindowHint)
@@ -496,6 +497,7 @@ class CaptureOverlay(QWidget):
             self._shot, self._vgeo = grab_virtual_desktop()
         self.setGeometry(self._vgeo)
         self._dpr = float(self._shot.devicePixelRatio()) or 1.0
+        self._show_hint = bool(show_hint)
 
         self._sel = QRect()
         self._origin = QPoint()
@@ -565,7 +567,7 @@ class CaptureOverlay(QWidget):
         sel = self._sel
         if sel.isNull() or sel.width() < 1 or sel.height() < 1:
             p.fillRect(self.rect(), DIM_COLOR)
-            if self._state == S_IDLE:
+            if self._state == S_IDLE and self._show_hint:
                 self._draw_hint(p)
             p.end()
             return
@@ -675,6 +677,9 @@ class CaptureOverlay(QWidget):
             # 这一下点击只用于结束文字输入，不再触发新建标注
             self._commit_text()
             return
+
+        if event.button() == Qt.LeftButton:
+            self.activated.emit()       # 多屏时让别的屏清掉自己的选区
 
         if event.button() == Qt.RightButton:
             if not self._sel.isNull():
@@ -1234,3 +1239,123 @@ class CaptureOverlay(QWidget):
         self._palette.hide()
         self.pinned.emit(img, screen_pos)
         self.close()
+
+
+# ------------------------------------------------------------------ 多屏会话
+class CaptureSession(QObject):
+    """一次截图会话：统一管理遮罩窗口。
+
+    平时用**一个**覆盖整个虚拟桌面的遮罩（可以跨屏框选，最省事）。
+    但两块屏缩放比例不同（主屏 150% + 副屏 100%）时，一个窗口在系统层面只能
+    按一个 DPI 渲染，另一块屏的内容必然错位甚至全黑 —— 这时改成**一屏一个遮罩**，
+    每块屏用自己的原生像素显示，选哪块屏就在哪块屏上框。
+    """
+
+    finished = pyqtSignal(object)        # QImage
+    pinned = pyqtSignal(object, object)  # QImage, QPoint
+    cancelled = pyqtSignal()
+    closed = pyqtSignal()
+
+    def __init__(self, desk=None, pen_color="#FF3B30", text_size=FONT_DEFAULT,
+                 text_bold=False):
+        super().__init__()
+        self._overlays = []
+        self._active = None
+        self._closed = False
+
+        if desk is None:
+            desk = capture_desktop()
+        self._desk = desk
+
+        if desk is not None and desk.is_mixed:
+            primary = QApplication.primaryScreen()
+            for screen, pm in desk.screens:
+                if pm is None or pm.isNull():
+                    continue
+                ov = CaptureOverlay(pen_color, text_size, text_bold, shot=pm,
+                                    vgeo=screen.geometry(),
+                                    show_hint=(screen is primary))
+                self._attach(ov)
+        else:
+            shot = desk.composite() if desk is not None else QPixmap()
+            vgeo = desk.vgeo if desk is not None else virtual_geometry()
+            if not shot.isNull():
+                self._attach(CaptureOverlay(pen_color, text_size, text_bold,
+                                            shot=shot, vgeo=vgeo))
+
+        if self._overlays:
+            self._active = self._overlays[0]
+
+    # ---------------------------------------------------------- 组装
+    def _attach(self, ov: CaptureOverlay):
+        ov.finished.connect(self._on_finished)
+        ov.pinned.connect(self._on_pinned)
+        ov.cancelled.connect(self._on_cancelled)
+        ov.activated.connect(lambda o=ov: self._on_activated(o))
+        self._overlays.append(ov)
+
+    @property
+    def overlays(self):
+        return list(self._overlays)
+
+    def is_multi(self) -> bool:
+        return len(self._overlays) > 1
+
+    # ---------------------------------------------------------- 生命周期
+    def show_overlay(self):
+        if not self._overlays:
+            self.cancelled.emit()
+            return
+        # 先铺满所有屏，最后把主屏那块抬起来，焦点才会落在它上面
+        for ov in self._overlays:
+            ov.show_overlay()
+        first = self._overlays[0]
+        first.raise_()
+        first.activateWindow()
+        first.setFocus(Qt.ActiveWindowFocusReason)
+
+    def text_style(self):
+        ov = self._active or (self._overlays[0] if self._overlays else None)
+        if ov is None:
+            return FONT_DEFAULT, False
+        try:
+            return ov.text_style()
+        except RuntimeError:
+            return FONT_DEFAULT, False
+
+    def _on_activated(self, ov):
+        self._active = ov
+        # 一块屏开始框选，别的屏上的选区就作废（同时只保留一个选区）
+        for other in self._overlays:
+            if other is ov:
+                continue
+            try:
+                if other._sel is not None and not other._sel.isNull():
+                    other._reset_selection()
+            except RuntimeError:
+                pass
+
+    def _close_all(self):
+        if self._closed:
+            return
+        self._closed = True
+        for ov in self._overlays:
+            try:
+                ov.close()
+            except RuntimeError:
+                pass
+        self._overlays = []
+        self.closed.emit()
+
+    def _on_finished(self, image):
+        # 先通知（主窗口要读一下字号/粗细），再关遮罩
+        self.finished.emit(image)
+        self._close_all()
+
+    def _on_pinned(self, image, pos):
+        self.pinned.emit(image, pos)
+        self._close_all()
+
+    def _on_cancelled(self):
+        self.cancelled.emit()
+        self._close_all()
