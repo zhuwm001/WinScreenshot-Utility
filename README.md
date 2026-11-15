@@ -105,6 +105,7 @@
   > **别用带 `Alt` 的组合键**（`Alt+Z`、`Ctrl+Alt+A` …）。别的软件展开多级菜单或下拉框时，
   > `Alt` 一按下菜单就会自动收起，截不到里面的内容。改用 `Ctrl+Shift+字母` 这类不含 `Alt`
   > 的组合即可正常截取。设置里录到含 `Alt` 的组合会当场显示橙色警告。
+- **启动时自动检查更新**：默认开启，有新版才弹窗；见下面「自动更新」。
 
 ## 使用
 
@@ -127,12 +128,33 @@
 
 ## 安装
 
-运行 `installer\我爱截图_安装包_v1.0.0.exe`，安装到当前用户目录
+从 [Releases](https://github.com/zhuwm001/WinScreenshot-Utility/releases/latest) 下载
+`我爱截图_安装包_v*.exe` 双击安装，装到当前用户目录
 （`%LOCALAPPDATA%\Programs\我爱截图`），不需要管理员权限。
 安装完可直接启动，程序常驻托盘。
 
 卸载：开始菜单 → "卸载 我爱截图"，或 Windows 设置 → 应用。
 卸载时会一并清掉开机启动项，不会留下失效条目。
+
+## 自动更新
+
+装好的软件会自己盯着 GitHub 上的 Release：
+
+- **启动后自动查一次**（8 秒后、静默，不打扰）：有新版直接弹窗列出更新内容；
+  没有新版就不出声。两次检查之间至少隔 12 小时，避免每次开程序都去请求。
+- **手动查**：右键托盘图标 →「检查更新…」，随时查，结果一定会显示。
+- 点「立即更新」→ 下载安装包（显示进度、可取消）→ 校验大小和 PE 头 →
+  关闭本程序 → `/VERYSILENT` 静默装新版 → 装完自动把新版拉起来，设置全部保留。
+- 免安装版（解压出来的 exe）不会自更新，弹窗里只会给出下载页链接，避免装一半乱掉。
+- 不想要自动检查：设置 → 版本与更新 → 取消「启动时自动检查更新」。
+
+> **前提：仓库必须是 Public。** 私有仓库的 Release 匿名读不到（GitHub 返回 404），
+> 别人电脑上的检查会一直失败。代码里留了 `WOJIETU_GITHUB_TOKEN` 环境变量做兜底，
+> 但令牌会跟着 exe 发出去，不安全，不建议用。
+
+发版流程（一条命令）：改好代码 → `git tag v1.1.0 && git push origin v1.1.0`，
+GitHub Actions 自动打包、建 Release、把安装包和免安装版挂上去，
+已经装了旧版的电脑下次启动就能收到更新。
 
 ## 目录结构
 
@@ -149,6 +171,8 @@
 │  ├─ hotkey.py             全局热键：低级键盘钩子 + RegisterHotKey 双保险
 │  ├─ winutil.py            窗口置前（绕过前台窗口锁，保证遮罩能收到键盘）
 │  ├─ toast.py              右下角消息提示（3 秒自动消失）
+│  ├─ update.py             检查更新 / 下载安装包 / 静默安装并重启
+│  ├─ update_dialog.py      更新提示窗口（更新内容、进度、结果）
 │  ├─ icons.py              代码绘制的矢量图标
 │  ├─ theme.py              配色与样式
 │  ├─ app_config.py         配置读写
@@ -190,12 +214,13 @@ python src\main.py
 
 | 方式 | 操作 | 结果 |
 | --- | --- | --- |
-| 手动 | Actions → **构建 Windows 安装包** → `Run workflow`，可填版本号（如 `1.1.0`，留空则沿用 `installer.iss` 里的） | 构建完在页面底部 Artifacts 下载 `installer`（安装包）和 `portable`（免安装目录） |
-| 打 tag | `git tag v1.1.0 && git push origin v1.1.0` | 自动构建并建 Release，安装包作为附件挂上去 |
+| 手动 | Actions → **构建 Windows 安装包** → `Run workflow`，可填版本号（如 `1.1.0`，留空则沿用 `src/app_config.py` 里的） | 构建完在页面底部 Artifacts 下载 `installer`（安装包）和 `portable`（免安装 zip）；勾了「同时发布 Release」还会直接发版 |
+| 打 tag | `git tag v1.1.0 && git push origin v1.1.0` | 自动构建、建 Release 并设为 Latest，安装包 / 免安装版 / SHA256SUMS 作为附件挂上去 |
 
+版本号优先级：手动填的 > tag 名（去掉前缀 `v`）> `src/app_config.py` 的 `APP_VERSION`。
 版本号会同步写进两个地方：`installer.iss` 的 `MyAppVersion`（由
-`tools/ci_set_version.py` 改）和 exe 的文件属性（`build_exe.py` 读环境变量
-`APP_VERSION`）。本地打包不设这个变量，默认仍是 `1.0.0`。
+`tools/ci_set_version.py` 改，保留原文件编码）和 exe 的文件属性（`build_exe.py` 读环境变量
+`APP_VERSION`）。本地打包不设这个变量，就用源码里的 `APP_VERSION`。
 
 ## 署名徽标
 
@@ -262,13 +287,15 @@ BADGE_PREFIX = "badge-letters"      # 文件名前缀：<前缀>-<宽度>.png
 ## 配置文件
 
 `%APPDATA%\我爱截图\config.json`，保存快捷键、关闭行为、是否隐藏自身、是否开机启动、
-上次用的标记颜色 / 文字字号 / 字重等。删除该文件即恢复默认设置。
+是否自动检查更新、上次检查时间、上次用的标记颜色 / 文字字号 / 字重等。
+删除该文件即恢复默认设置。
 
 开机启动项在 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 下的 `WoAiJieTu`，
 命令形如 `"…\我爱截图.exe" --autostart`（这个参数让程序启动后直接进托盘）。
 
 ## 说明
 
-- 抓屏使用 Qt 的 `QScreen.grabWindow`，多显示器会拼成一张整图，高 DPI 下按原始像素导出，不糊。
+- 抓屏按显示器逐个 `CreateDC("\\.\DISPLAYn")` + BitBlt 取原生像素，再按各自逻辑矩形拼装；
+  混合缩放（如主屏 150% + 副屏 100%）下不会串位、不会有一块黑。
 - 剪贴板为图片格式，Word / 微信 / 画图 / PS 等都能直接粘贴。
 - 程序为绿色单目录结构，卸载只删除程序文件，配置文件（设置）会保留。

@@ -1,25 +1,31 @@
 name: 构建 Windows 安装包
 
 # 什么时候跑：
-#   1) 在 Actions 页面手动点「Run workflow」（可填版本号）
-#   2) 推送 v 开头的 tag，例如 git push origin v1.0.0 —— 会自动建 Release 并挂上安装包
+#   1) 推送 v 开头的 tag（如 git push origin v1.1.0）—— 自动建 Release 并挂上安装包
+#   2) 在 Actions 页面手动点「Run workflow」，可填版本号，也可选是否同时发 Release
+#
+# Release 一建好，已经装了旧版本的电脑就会在软件里收到更新提示。
+# 前提：仓库必须是公开的（私有仓库的 Release 匿名下载不到）。
 
 on:
   workflow_dispatch:
     inputs:
       version:
-        description: "版本号，如 1.0.0；留空则沿用 installer.iss 里现有的版本"
+        description: "版本号，如 1.1.0；留空则沿用源码里现有的版本"
         required: false
         default: ""
+      release:
+        description: "同时发布 Release（并设为 Latest）"
+        type: boolean
+        required: false
+        default: true
   push:
     tags:
       - "v*"
 
-# 上传 Release 需要写权限
 permissions:
   contents: write
 
-# 同样的分支/tag 重复触发时，取消上一次，省时间
 concurrency:
   group: build-${{ github.ref }}
   cancel-in-progress: true
@@ -37,10 +43,13 @@ jobs:
 
     steps:
       - name: 拉取代码
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
+        with:
+          # 生成变更日志要读历史 tag，浅克隆不够
+          fetch-depth: 0
 
       - name: 安装 Python 3.10
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.10"
           cache: pip
@@ -55,13 +64,14 @@ jobs:
             $v = ("${{ github.ref_name }}" -replace '^[vV]', '').Trim()
           }
           if (-not $v) {
-            $m = Select-String -Path installer.iss -Pattern '#define MyAppVersion "([^"]+)"'
+            $m = Select-String -Path src\app_config.py -Pattern 'APP_VERSION = "([^"]+)"'
             $v = $m.Matches[0].Groups[1].Value
           }
+          if ($v -notmatch '^\d+\.\d+(\.\d+)?$') { throw "版本号格式不对：$v" }
           "version=$v" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
           Write-Host "本次版本号：$v"
 
-      - name: 把版本号写进安装脚本
+      - name: 把版本号写进安装脚本和源码
         run: python tools/ci_set_version.py ${{ steps.ver.outputs.version }}
 
       - name: 安装依赖
@@ -89,40 +99,99 @@ jobs:
           & $iscc installer.iss
           if ($LASTEXITCODE -ne 0) { throw "Inno Setup 编译失败，退出码 $LASTEXITCODE" }
 
-      - name: 检查产物
+      - name: 打包免安装版
         shell: pwsh
         run: |
-          $exe = Get-ChildItem installer\*.exe -ErrorAction SilentlyContinue
-          if (-not $exe) { throw "installer 目录下没有生成 exe" }
-          $exe | ForEach-Object { Write-Host ("{0}    {1:N2} MB" -f $_.Name, ($_.Length / 1MB)) }
-          Get-ChildItem dist -Directory | ForEach-Object {
-            $mb = (Get-ChildItem $_.FullName -Recurse -File | Measure-Object Length -Sum).Sum / 1MB
-            Write-Host ("dist\{0}    {1:N2} MB" -f $_.Name, $mb)
-          }
+          $zip = "dist\我爱截图_免安装版_v${{ steps.ver.outputs.version }}.zip"
+          Compress-Archive -Path "dist\我爱截图\*" -DestinationPath $zip -CompressionLevel Optimal
+          Write-Host ("{0}  {1:N2} MB" -f $zip, ((Get-Item $zip).Length / 1MB))
 
-      - name: 上传安装包
-        uses: actions/upload-artifact@v4
+      - name: 检查产物并生成校验值
+        id: sums
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem installer\*.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $exe) { throw "installer 目录下没有生成 exe" }
+          Write-Host ("{0}    {1:N2} MB" -f $exe.Name, ($exe.Length / 1MB))
+          $hash = (Get-FileHash $exe.FullName -Algorithm SHA256).Hash.ToLower()
+          $zip = Get-ChildItem "dist\*.zip" | Select-Object -First 1
+          $zipHash = (Get-FileHash $zip.FullName -Algorithm SHA256).Hash.ToLower()
+
+          "exe_name=$($exe.Name)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "exe_sha256=$hash"       | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "exe_size={0:N1}" -f ($exe.Length / 1MB) | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+          @(
+            "$hash  $($exe.Name)"
+            "$zipHash  $($zip.Name)"
+          ) | Out-File -FilePath dist\SHA256SUMS.txt -Encoding utf8
+          Get-Content dist\SHA256SUMS.txt
+
+      - name: 生成更新说明
+        shell: pwsh
+        run: |
+          $prev = ""
+          try { $prev = (git describe --tags --abbrev=0 HEAD^ 2>$null) } catch { $prev = "" }
+          if ($prev) {
+            $log = git log "$prev..HEAD" --pretty=format:"- %s" --no-merges
+            Write-Host "变更范围：$prev..HEAD"
+          } else {
+            $log = git log --pretty=format:"- %s" --no-merges -15
+            Write-Host "没有上一个 tag，取最近 15 条提交"
+          }
+          if (-not $log) { $log = "- 细节优化与问题修复" }
+
+          $body = @"
+          ### 更新内容
+
+          $log
+
+          ### 下载
+
+          | 版本 | 文件 | 说明 |
+          | --- | --- | --- |
+          | 安装版（推荐） | `${{ steps.sums.outputs.exe_name }}` | ${{ steps.sums.outputs.exe_size }} MB，静默安装，可在软件内一键更新 |
+          | 免安装版 | `我爱截图_免安装版_v${{ steps.ver.outputs.version }}.zip` | 解压即用，不写注册表 |
+
+          ### 校验
+
+          SHA256（安装包）：`${{ steps.sums.outputs.exe_sha256 }}`
+
+          安装包未做代码签名，首次运行如果弹出 SmartScreen 提示，点「更多信息 → 仍要运行」即可。
+          "@
+          $body | Out-File -FilePath dist\release_body.md -Encoding utf8
+          Write-Host $body
+
+      - name: 上传安装包（构建产物）
+        uses: actions/upload-artifact@v7
         with:
           name: installer
           path: installer/*.exe
           if-no-files-found: error
 
-      - name: 上传免安装版
-        uses: actions/upload-artifact@v4
+      - name: 上传免安装版（构建产物）
+        uses: actions/upload-artifact@v7
         with:
           name: portable
-          path: dist/我爱截图/**
+          path: dist/*.zip
           if-no-files-found: error
 
-      - name: 发布 Release（仅推送 tag 时）
-        if: github.ref_type == 'tag'
-        uses: softprops/action-gh-release@v2
+      - name: 发布 Release
+        if: >-
+          github.ref_type == 'tag' ||
+          (github.event_name == 'workflow_dispatch' && github.event.inputs.release == 'true')
+        uses: softprops/action-gh-release@v3
         with:
+          tag_name: v${{ steps.ver.outputs.version }}
           name: 我爱截图 v${{ steps.ver.outputs.version }}
-          files: installer/*.exe
-          generate_release_notes: true
-          body: |
-            自动构建产物，Windows 10/11 x64。
-
-            - 安装版：下载下方 `我爱截图_安装包_v*.exe`，默认装到 `%LOCALAPPDATA%\Programs\我爱截图`，可选创建桌面快捷方式
-            - 免安装版：Actions 页面对应那次构建的 `portable` artifact
+          body_path: dist/release_body.md
+          files: |
+            installer/*.exe
+            dist/*.zip
+            dist/SHA256SUMS.txt
+          draft: false
+          prerelease: false
+          make_latest: true
+          fail_on_unmatched_files: true
+          # 同名 tag 重跑时覆盖旧资产，避免 422
+          overwrite_files: true

@@ -11,8 +11,8 @@ ASSETS = os.path.join(ROOT, "assets")
 WORK = os.path.join(ROOT, "build", "pyi")
 DIST = os.path.join(ROOT, "dist")
 APP_NAME = "我爱截图"
-# 版本号可用环境变量 APP_VERSION 覆盖（CI 里按 tag 传入），默认 1.0.1
-VERSION = (os.environ.get("APP_VERSION") or "1.0.1").strip()
+# 版本号可用环境变量 APP_VERSION 覆盖（CI 里按 tag 传入），默认 1.1.0
+VERSION = (os.environ.get("APP_VERSION") or "1.1.0").strip()
 
 
 def _version_parts(text):

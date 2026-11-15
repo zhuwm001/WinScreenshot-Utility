@@ -8,7 +8,7 @@ from PyQt5.QtWidgets import (
 )
 
 import theme
-from app_config import APP_NAME, DEFAULTS
+from app_config import APP_NAME, APP_VERSION, DEFAULTS
 import autostart
 from hotkey import contains_alt
 
@@ -181,8 +181,8 @@ class SettingsDialog(QDialog):
         self.setWindowFlag(Qt.WindowContextHelpButtonHint, False)
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(24, 20, 24, 18)
-        root.setSpacing(12)
+        root.setContentsMargins(22, 16, 22, 14)
+        root.setSpacing(10)
 
         # ---------------- 截图行为 ----------------
         body = self._card("截图", root)
@@ -226,15 +226,29 @@ class SettingsDialog(QDialog):
         self.lbl_alt.setWordWrap(True)
         self.lbl_alt.hide()
         body.addWidget(self.lbl_alt)
-        body.addWidget(self._hint("点击输入框后直接按下组合键，需包含 Ctrl / Alt / Shift / Win 之一。"))
-        body.addWidget(self._hint("别用带 Alt 的组合键：别的软件展开多级菜单或下拉框时，"
-                                 "Alt 一按下菜单就会自动收起，截不到里面的内容。"
-                                 "改用 Ctrl+Shift+字母 即可。"))
+        body.addWidget(self._hint("点输入框后直接按组合键（需含 Ctrl/Shift/Win）。"
+                                 "别用带 Alt 的：Alt 一按，别人展开着的菜单就会收起，"
+                                 "截不到内容，改用 Ctrl+Shift+字母。"))
         self.lbl_error = QLabel("")
         self.lbl_error.setStyleSheet("color: %s; font-size: 12px;" % theme.DANGER)
         self.lbl_error.setWordWrap(True)
         self.lbl_error.hide()
         body.addWidget(self.lbl_error)
+
+        # ---------------- 版本与更新 ----------------
+        body = self._card("版本与更新", root)
+        row = QHBoxLayout()
+        row.setSpacing(10)
+        self.lbl_version = QLabel("当前版本 %s" % APP_VERSION)
+        self.lbl_version.setObjectName("versionText")
+        row.addWidget(self.lbl_version)
+        row.addStretch(1)
+        self.chk_update = QCheckBox("启动时自动检查更新")
+        self.chk_update.setChecked(bool(cfg.get("check_update")))
+        row.addWidget(self.chk_update)
+        body.addLayout(row)
+        body.addWidget(self._hint("发现新版本会在软件里提示；点「立即更新」自动下载、静默安装并重开。"
+                                 "手动检查：右键托盘图标 →「检查更新…」。"))
 
         root.addStretch(1)
 
@@ -275,8 +289,8 @@ class SettingsDialog(QDialog):
         card = QFrame(self)
         card.setObjectName("card")
         lay = QVBoxLayout(card)
-        lay.setContentsMargins(16, 12, 16, 14)
-        lay.setSpacing(7)
+        lay.setContentsMargins(16, 10, 16, 12)
+        lay.setSpacing(6)
         label = QLabel(title, card)
         label.setObjectName("sectionTitle")
         lay.addWidget(label)
@@ -310,6 +324,7 @@ class SettingsDialog(QDialog):
             "hide_self": self.chk_hide.isChecked(),
             "close_action": "exit" if self.rb_exit.isChecked() else "tray",
             "auto_start": self.chk_auto.isChecked(),
+            "check_update": self.chk_update.isChecked(),
             "hotkey": hotkey,
         }
 
@@ -321,6 +336,7 @@ class SettingsDialog(QDialog):
         else:
             self.rb_tray.setChecked(True)
         self.chk_auto.setChecked(bool(DEFAULTS["auto_start"]))
+        self.chk_update.setChecked(bool(DEFAULTS["check_update"]))
         self.hotkey_edit.set_value(DEFAULTS["hotkey"])
 
     def accept(self):

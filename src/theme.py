@@ -120,6 +120,11 @@ def dialog_qss():
         font-size: 12px;
         color: #7C8598;
     }}
+    QLabel#versionText {{
+        font-size: 14px;
+        font-weight: 600;
+        color: {TEXT};
+    }}
     QFrame#card {{
         background: {BG_SOFT};
         border: 1px solid #EAEEF6;

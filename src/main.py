@@ -2,6 +2,7 @@
 """我爱截图 —— 程序入口与总控。"""
 import os
 import sys
+import time
 
 from PyQt5.QtCore import QObject, QRect, Qt, QTimer
 from PyQt5.QtGui import QColor, QIcon
@@ -19,8 +20,15 @@ from pin_window import PinWindow
 from screenshot import capture_desktop, set_process_dpi_awareness
 from settings_dialog import SettingsDialog
 from toast import Toast
+from update import (UpdateChecker, launch_silent_install, running_exe)
+from update_dialog import MODE_ERROR, MODE_LATEST, MODE_NEW, UpdateDialog
 
 SERVER_NAME = "WoAiJieTu.SingleInstance.v1"
+
+# 启动后多久去问 GitHub（留出时间给界面先起来）
+UPDATE_DELAY_MS = 6000
+# 同一台机器两次自动检查之间至少隔多久
+UPDATE_INTERVAL = 6 * 3600
 
 
 def acquire_single_instance():
@@ -52,6 +60,8 @@ class AppController(QObject):
         self.overlay = None
         self._capture_guard = False
         self._hide_rect = QRect()
+        self._checker = None
+        self._update_dlg = None
 
         self.win = MainWindow(config.get("hotkey"))
         self.win.capture_requested.connect(self.start_capture)
@@ -81,6 +91,7 @@ class AppController(QObject):
             self.open_settings()
         self._refresh_tray_menu()
         self._sync_autostart()
+        self._schedule_update_check()
 
     def _sync_autostart(self):
         """校正注册表里的启动项，与设置里的开关保持一致。"""
@@ -104,7 +115,7 @@ class AppController(QObject):
             import icons
             ico = icons.render_icon("camera", 32)
         self.tray = QSystemTrayIcon(ico, self)
-        self.tray.setToolTip(APP_NAME)
+        self.tray.setToolTip("%s %s" % (APP_NAME, APP_VERSION))
         self.tray.setContextMenu(QMenu())
         self.tray.activated.connect(self._on_tray_activated)
         self.tray.show()
@@ -128,6 +139,10 @@ class AppController(QObject):
 
         act_settings = menu.addAction("设置…")
         act_settings.triggered.connect(self.open_settings)
+
+        menu.addSeparator()
+        act_update = menu.addAction("检查更新…")
+        act_update.triggered.connect(lambda: self.check_updates(silent=False))
 
         menu.addSeparator()
         act_quit = menu.addAction("退出")
@@ -273,6 +288,89 @@ class AppController(QObject):
             self.win.setAttribute(Qt.WA_ShowWithoutActivating, True)
             self.win.show()
         self._restore_main = False
+
+    # ------------------------------------------------------------ 更新
+    def _schedule_update_check(self):
+        """启动后按频率问一次 GitHub；关掉「自动检查」就完全不问。"""
+        if not config.get("check_update"):
+            return
+        try:
+            last = int(config.get("update_last_check") or 0)
+        except (TypeError, ValueError):
+            last = 0
+        if time.time() - last < UPDATE_INTERVAL:
+            return
+        QTimer.singleShot(UPDATE_DELAY_MS, lambda: self.check_updates(silent=True))
+
+    def check_updates(self, silent: bool = False):
+        if self._checker is not None or self._update_dlg is not None:
+            return
+        # 先记时间：失败了也别每次开机都重试，6 小时后再来
+        config.set("update_last_check", int(time.time()))
+        config.save()
+        self._checker = UpdateChecker(self)
+        self._checker.found.connect(self._on_update_found)
+        self._checker.latest.connect(lambda ver: self._on_update_latest(ver, silent))
+        self._checker.failed.connect(lambda msg: self._on_update_failed(msg, silent))
+        self._checker.check(APP_VERSION)
+        if not silent:
+            Toast.show_toast("正在检查更新", "正在连接 GitHub…", kind="info", timeout=2000)
+
+    def _drop_checker(self):
+        checker = self._checker
+        self._checker = None
+        if checker is not None:
+            checker.deleteLater()
+
+    def _on_update_found(self, info):
+        self._drop_checker()
+        self._open_update_dialog(info, MODE_NEW)
+
+    def _on_update_latest(self, version, silent):
+        self._drop_checker()
+        if not silent:
+            self._open_update_dialog(None, MODE_LATEST)
+
+    def _on_update_failed(self, message, silent):
+        self._drop_checker()
+        if not silent:
+            self._open_update_dialog(None, MODE_ERROR, message)
+
+    def _open_update_dialog(self, info, mode, message: str = ""):
+        if self._update_dlg is not None:
+            self._update_dlg.raise_()
+            self._update_dlg.activateWindow()
+            return
+        parent = self.win if self.win.isVisible() else None
+        dlg = UpdateDialog(info=info, message=message, mode=mode, parent=parent)
+        dlg.setWindowFlag(Qt.WindowStaysOnTopHint, True)
+        dlg.ready_to_install.connect(self._install_update)
+        dlg.retry_requested.connect(self._retry_check)
+        dlg.finished.connect(self._on_update_dialog_closed)
+        self._update_dlg = dlg
+        dlg.show()
+        dlg.raise_()
+        dlg.activateWindow()
+
+    def _on_update_dialog_closed(self, *_):
+        self._update_dlg = None
+
+    def _retry_check(self):
+        QTimer.singleShot(200, lambda: self.check_updates(silent=False))
+
+    def _install_update(self, installer_path: str):
+        try:
+            # argv[1:] 原样带过去：开机自启时带 --autostart，重启后仍是静默启动
+            launch_silent_install(installer_path, running_exe(), sys.argv[1:])
+        except Exception as e:
+            QMessageBox.warning(
+                self.win if self.win.isVisible() else None, "无法开始安装",
+                "启动安装程序失败：%s\n\n安装包已下载到：\n%s" % (e, installer_path))
+            return
+        Toast.show_toast("正在安装新版本", "软件会自动关闭并重新打开。",
+                         kind="check", timeout=2500)
+        # 留一点时间让界面刷完再退出；安装程序自己会等 3 秒
+        QTimer.singleShot(300, self.quit_app)
 
     # ------------------------------------------------------------ 设置
     def open_settings(self):
