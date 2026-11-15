@@ -106,6 +106,23 @@ jobs:
           Compress-Archive -Path "dist\我爱截图\*" -DestinationPath $zip -CompressionLevel Optimal
           Write-Host ("{0}  {1:N2} MB" -f $zip, ((Get-Item $zip).Length / 1MB))
 
+      # GitHub 上传 Release 附件时会把中文名改写成 "_._v1.1.0.exe"，
+      # 下载地址虽然还能用，但文件名彻底丢了、也没法按名字挑安装包。
+      # 所以上传前统一改成纯 ASCII，名字里带 Setup / Portable 方便更新程序识别。
+      - name: 改成 ASCII 文件名
+        shell: pwsh
+        run: |
+          $v = "${{ steps.ver.outputs.version }}"
+          $exe = Get-ChildItem installer\*.exe | Select-Object -First 1
+          if (-not $exe) { throw "installer 目录下没有 exe" }
+          Move-Item $exe.FullName "installer\WoAiJieTu-Setup-v$v.exe" -Force
+
+          $zip = Get-ChildItem "dist\*.zip" | Select-Object -First 1
+          if (-not $zip) { throw "dist 目录下没有 zip" }
+          Move-Item $zip.FullName "dist\WoAiJieTu-Portable-v$v.zip" -Force
+
+          Get-ChildItem installer, dist -File | Select-Object Name, Length | Format-Table -AutoSize
+
       - name: 检查产物并生成校验值
         id: sums
         shell: pwsh
@@ -133,10 +150,10 @@ jobs:
           $prev = ""
           try { $prev = (git describe --tags --abbrev=0 HEAD^ 2>$null) } catch { $prev = "" }
           if ($prev) {
-            $log = git log "$prev..HEAD" --pretty=format:"- %s" --no-merges
+            $log = (git log "$prev..HEAD" --pretty=format:"- %s" --no-merges) -join "`n"
             Write-Host "变更范围：$prev..HEAD"
           } else {
-            $log = git log --pretty=format:"- %s" --no-merges -15
+            $log = (git log --pretty=format:"- %s" --no-merges -15) -join "`n"
             Write-Host "没有上一个 tag，取最近 15 条提交"
           }
           if (-not $log) { $log = "- 细节优化与问题修复" }
@@ -150,13 +167,14 @@ jobs:
 
           | 版本 | 文件 | 说明 |
           | --- | --- | --- |
-          | 安装版（推荐） | `${{ steps.sums.outputs.exe_name }}` | ${{ steps.sums.outputs.exe_size }} MB，静默安装，可在软件内一键更新 |
-          | 免安装版 | `我爱截图_免安装版_v${{ steps.ver.outputs.version }}.zip` | 解压即用，不写注册表 |
+          | 安装版（推荐） | `${{ steps.sums.outputs.exe_name }}` | ${{ steps.sums.outputs.exe_size }} MB，装好后支持软件内一键更新 |
+          | 免安装版 | `WoAiJieTu-Portable-v${{ steps.ver.outputs.version }}.zip` | 解压即用，不写注册表，不支持自动更新 |
 
           ### 校验
 
           SHA256（安装包）：`${{ steps.sums.outputs.exe_sha256 }}`
 
+          已有的旧版本无需手动下载：下次启动会自动提示更新，点「立即更新」即可。
           安装包未做代码签名，首次运行如果弹出 SmartScreen 提示，点「更多信息 → 仍要运行」即可。
           "@
           $body | Out-File -FilePath dist\release_body.md -Encoding utf8
