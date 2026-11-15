@@ -28,7 +28,4 @@ build/.ghtoken
 .idea/
 Thumbs.db
 desktop.ini
-tools/test_session_flow.py
-tools/diag_multimon.py
-tools/test_multimon_capture.py
-tools/test_overlay_multimon.py
+
