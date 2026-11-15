@@ -23,14 +23,25 @@ from PyQt5.QtNetwork import (
 )
 
 from app_config import APP_NAME, APP_VERSION
+import manifest
 
 # ---------------------------------------------------------------- 常量
 # 只改这一行就能换仓库
 REPO = "zhuwm001/WinScreenshot-Utility"
 API_ROOT = "https://api.github.com"
 LATEST_API = "%s/repos/%s/releases/latest" % (API_ROOT, REPO)
+# 永远指向「最新那个 Release」上的同名附件，不用先查 API 拿 id
+MANIFEST_URL = "https://github.com/%s/releases/latest/download/latest.json" % REPO
 RELEASE_PAGE = "https://github.com/%s/releases/latest" % REPO
 USER_AGENT = "WoAiJieTu-Updater/1.0"
+
+# 安装包只许从这几个域名下，防止清单被改指到奇怪的地方（清单本身有签名，这里是第二道）
+ALLOWED_HOSTS = (
+    "github.com",
+    "objects.githubusercontent.com",
+    "release-assets.githubusercontent.com",
+    "github-releases.githubusercontent.com",
+)
 
 # Inno Setup 卸载登记项里的 AppId，用来查「当前这份是不是安装上去的」
 UNINSTALL_KEY = (
@@ -70,7 +81,8 @@ class ReleaseInfo(object):
     """一条 Release 里更新程序需要的那几样东西。"""
 
     __slots__ = ("version", "tag", "title", "notes", "notes_text", "page_url",
-                 "asset_name", "asset_url", "asset_size", "digest", "published_at")
+                 "asset_name", "asset_url", "asset_size", "digest", "published_at",
+                 "sha256", "signed")
 
     def __init__(self, **kw):
         for k in self.__slots__:
@@ -159,7 +171,49 @@ def parse_release(data, current=APP_VERSION, allow_same=False):
         asset_size=(asset or {}).get("size") or 0,
         digest=(asset or {}).get("digest") or "",
         published_at=data.get("published_at") or "",
+        sha256="",
+        signed=False,          # 走 API 的这条路没有签名，只留作兼容
     )
+
+
+def parse_manifest(payload, current=APP_VERSION):
+    """把验签通过的清单 payload 变成 ReleaseInfo；不比本地新就返回 None。"""
+    if not isinstance(payload, dict):
+        return None
+    version = ".".join(str(x) for x in parse_version(payload.get("version")))
+    if not version or not is_newer(version, current):
+        return None
+    asset = payload.get("asset") or {}
+    sha = str(asset.get("sha256") or "").lower()
+    notes = payload.get("notes") or ""
+    return ReleaseInfo(
+        version=version,
+        tag=str(payload.get("tag") or ""),
+        title="%s %s" % (APP_NAME, version),
+        notes=notes,
+        notes_text=plain_notes(notes),
+        page_url=RELEASE_PAGE,
+        asset_name=asset.get("name"),
+        asset_url=asset.get("url"),
+        asset_size=int(asset.get("size") or 0),
+        digest=("sha256:" + sha) if sha else "",
+        published_at=payload.get("published_at") or "",
+        sha256=sha,
+        signed=True,
+    )
+
+
+def url_allowed(url: str) -> bool:
+    """安装包地址是不是在允许的域名下。"""
+    try:
+        from urllib.parse import urlparse
+        u = urlparse(url)
+    except Exception:
+        return False
+    if u.scheme != "https":
+        return False
+    host = (u.hostname or "").lower()
+    return any(host == h or host.endswith("." + h) for h in ALLOWED_HOSTS)
 
 
 # ---------------------------------------------------------------- 已安装？
@@ -215,8 +269,11 @@ def _make_nam(parent=None) -> QNetworkAccessManager:
 def _request(url: str) -> QNetworkRequest:
     req = QNetworkRequest(QUrl(url))
     req.setHeader(QNetworkRequest.UserAgentHeader, USER_AGENT)
-    req.setRawHeader(b"Accept", b"application/vnd.github+json")
-    req.setRawHeader(b"X-GitHub-Api-Version", b"2022-11-28")
+    # 只有真的打 API 时才带那套头；附件下载（github.com/...）带了反而多余
+    if "api.github.com" in url:
+        req.setRawHeader(b"Accept", b"application/vnd.github+json")
+        req.setRawHeader(b"X-GitHub-Api-Version", b"2022-11-28")
+    req.setRawHeader(b"Cache-Control", b"no-cache")
     tok = _token()
     if tok:
         req.setRawHeader(b"Authorization", ("Bearer " + tok).encode("ascii"))
@@ -225,8 +282,8 @@ def _request(url: str) -> QNetworkRequest:
 
 def _http_hint(status: int) -> str:
     if status == 404:
-        return ("仓库或 Release 不可访问（HTTP 404）。如果仓库还是 Private，"
-                "别人电脑上读不到，需要把它改成 Public。")
+        return ("没找到更新清单（HTTP 404）。可能是还没发布带 latest.json 的版本，"
+                "或者仓库又改回 Private 了。")
     if status in (403, 429):
         return "GitHub 拒绝访问（HTTP %d），可能是访问太频繁，过一会儿再试。" % status
     if status >= 500:
@@ -235,7 +292,11 @@ def _http_hint(status: int) -> str:
 
 
 class UpdateChecker(QObject):
-    """异步检查一次最新版本。三种结果三选一，不会都发。"""
+    """异步检查一次最新版本。三种结果三选一，不会都发。
+
+    只认**签过名**的清单（latest.json）：拿不到或验签不过一律失败，
+    绝不退回去用未签名的数据。
+    """
 
     found = pyqtSignal(object)     # ReleaseInfo
     latest = pyqtSignal(str)       # 当前版本，已是最新
@@ -253,7 +314,7 @@ class UpdateChecker(QObject):
     def check(self, current=APP_VERSION, timeout_ms=12000):
         self._current = current or APP_VERSION
         self._done = False
-        self._reply = self._nam.get(_request(LATEST_API))
+        self._reply = self._nam.get(_request(MANIFEST_URL))
         self._reply.finished.connect(self._on_finished)
         self._timer.start(timeout_ms)
 
@@ -292,17 +353,19 @@ class UpdateChecker(QObject):
 
         try:
             import json
-            data = json.loads(bytes(reply.readAll()).decode("utf-8", "replace"))
+            doc = json.loads(bytes(reply.readAll()).decode("utf-8", "replace"))
         except Exception:
-            self.failed.emit("解析 GitHub 返回的数据失败。")
+            self.failed.emit("解析更新清单失败（内容不是合法 JSON）。")
             return
 
-        info = parse_release(data, self._current)
+        payload, reason = manifest.verify_document(doc)
+        if payload is None:
+            self.failed.emit("更新清单校验失败：%s" % reason)
+            return
+
+        info = parse_manifest(payload, self._current)
         if info is None:
-            if data.get("tag_name"):
-                self.latest.emit(self._current)
-            else:
-                self.failed.emit("还没发布过任何版本。")
+            self.latest.emit(self._current)
             return
         self.found.emit(info)
 
@@ -333,6 +396,13 @@ class InstallerDownloader(QObject):
     def start(self, info: ReleaseInfo, dest_dir: str = ""):
         if not info or not info.asset_url:
             self.failed.emit("这个版本没有可下载的安装包。")
+            return
+        if not url_allowed(info.asset_url):
+            self.failed.emit("安装包地址不在允许的域名下，已拒绝下载：%s" % info.asset_url)
+            return
+        if not str(info.digest or "").startswith("sha256:"):
+            # 没有校验值就没法确认下到的东西是不是原包，宁可不装
+            self.failed.emit("更新清单里没有 sha256 校验值，已拒绝下载。")
             return
         dest_dir = dest_dir or tempfile.gettempdir()
         os.makedirs(dest_dir, exist_ok=True)
@@ -451,11 +521,18 @@ class InstallerDownloader(QObject):
             return
         if self._digest.startswith("sha256:"):
             want = self._digest.split(":", 1)[1]
-            if sha256_file(self._path) != want:
+            got = sha256_file(self._path)
+            if got != want:
                 self._verified = False
                 self._cleanup_partial()
                 self.failed.emit("安装包校验失败（sha256 不一致），已删除，请重试。")
                 return
+        else:
+            # 走到这里说明清单没给校验值（正常流程在 start() 就挡掉了）
+            self._verified = False
+            self._cleanup_partial()
+            self.failed.emit("没有 sha256 校验值，已拒绝安装。")
+            return
 
         self._verified = True
         self.done.emit(self._path)

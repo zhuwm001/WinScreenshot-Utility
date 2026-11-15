@@ -183,9 +183,14 @@ class UpdateDialog(QDialog):
             day = _short_date(info.published_at)
             if day:
                 bits.append("发布于 %s" % day)
+            if getattr(info, "signed", False):
+                bits.append("签名已校验")
         self.lbl_sub.setText(" · ".join(bits))
 
         text = (info.notes_text if info is not None else "") or "这个版本没有填写更新说明。"
+        if info is not None and getattr(info, "signed", False):
+            text = ("更新清单已通过签名校验（Ed25519），安装包下载后还会核对 sha256，"
+                    "对不上不会安装。\n\n" + text)
         if not info or not info.has_installer:
             text += "\n\n⚠ 这个版本没有附带安装包，只能到发布页手动下载。"
             self.btn_go.setText("打开发布页")

@@ -5,7 +5,7 @@ import os
 
 APP_NAME = "我爱截图"
 APP_ID = "WoAiJieTu"
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.1.1"
 
 DEFAULTS = {
     "config_schema": 2,              # 配置结构版本，用于旧配置迁移

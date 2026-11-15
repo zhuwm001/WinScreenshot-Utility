@@ -158,6 +158,9 @@ jobs:
           }
           if (-not $log) { $log = "- 细节优化与问题修复" }
 
+          # 客户端更新弹窗只看这段（不带下载表格），GitHub 页面看完整版
+          $log | Out-File -FilePath dist\notes.md -Encoding utf8
+
           $body = @"
           ### 更新内容
 
@@ -179,6 +182,20 @@ jobs:
           "@
           $body | Out-File -FilePath dist\release_body.md -Encoding utf8
           Write-Host $body
+
+      # 签名清单：客户端只认这份东西。私钥在仓库 Secret 里，永远不进仓库、不进日志。
+      # 清单写进 payload 的是「版本 + 文件名 + 大小 + sha256 + 下载地址」，签完自检一遍。
+      - name: 生成并签名更新清单
+        env:
+          UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
+        shell: pwsh
+        run: |
+          $v = "${{ steps.ver.outputs.version }}"
+          $exe = "installer\WoAiJieTu-Setup-v$v.exe"
+          if (-not (Test-Path $exe)) { throw "找不到 $exe" }
+          python tools/sign_manifest.py --exe $exe --version $v `
+            --notes dist\notes.md --out dist\latest.json
+          if ($LASTEXITCODE -ne 0) { throw "签名失败，退出码 $LASTEXITCODE" }
 
       - name: 上传安装包（构建产物）
         uses: actions/upload-artifact@v7
@@ -206,6 +223,7 @@ jobs:
           files: |
             installer/*.exe
             dist/*.zip
+            dist/latest.json
             dist/SHA256SUMS.txt
           draft: false
           prerelease: false
