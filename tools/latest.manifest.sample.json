@@ -1,0 +1,17 @@
+{
+  "payload": {
+    "schema": 1,
+    "repo": "zhuwm001/WinScreenshot-Utility",
+    "version": "1.1.1",
+    "tag": "v1.1.1",
+    "published_at": "2026-11-15T16:20:37Z",
+    "notes": "- 自动更新加签名校验（v1.1.1）",
+    "asset": {
+      "name": "WoAiJieTu-Setup-v1.1.1.exe",
+      "size": 28378133,
+      "sha256": "a806bcaf35d5835414b8fb2c0e4a49e47a26fd671901183e281f6e30f07af65a",
+      "url": "https://github.com/zhuwm001/WinScreenshot-Utility/releases/download/v1.1.1/WoAiJieTu-Setup-v1.1.1.exe"
+    }
+  },
+  "signature": "iydHwLfsN7WgKijHM2PZePiILmsdcvKVVq0rzKTaLi5+R9bDXZ4DSTQRyjVQqU847gqoEvTI9be7775taB91Bg=="
+}
