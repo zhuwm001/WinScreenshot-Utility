@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
 """设置对话框：截图行为、关闭行为、开机启动、全局快捷键。"""
+import datetime
+
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtGui import QIcon
 from PyQt5.QtWidgets import (
@@ -249,6 +251,8 @@ class SettingsDialog(QDialog):
         body.addLayout(row)
         body.addWidget(self._hint("发现新版本会在软件里提示；点「立即更新」自动下载、静默安装并重开。"
                                  "手动检查：右键托盘图标 →「检查更新…」。"))
+        # 让「到底有没有在查」看得见：怀疑没提示时先看这一行
+        body.addWidget(self._hint(self._last_check_text(cfg)))
 
         root.addStretch(1)
 
@@ -303,6 +307,25 @@ class SettingsDialog(QDialog):
         lbl.setObjectName("hint")
         lbl.setWordWrap(True)
         return lbl
+
+    @staticmethod
+    def _last_check_text(cfg) -> str:
+        """上次检查更新的时间，让用户能确认自动检查到底跑没跑。"""
+        try:
+            ts = int(cfg.get("update_last_check") or 0)
+        except (TypeError, ValueError):
+            ts = 0
+        if ts <= 0:
+            return "上次检查：还没有记录（重启软件会立刻查一次）"
+        dt = datetime.datetime.fromtimestamp(ts)
+        today = datetime.date.today()
+        if dt.date() == today:
+            when = "今天 %s" % dt.strftime("%H:%M")
+        elif dt.date() == today - datetime.timedelta(days=1):
+            when = "昨天 %s" % dt.strftime("%H:%M")
+        else:
+            when = dt.strftime("%Y-%m-%d %H:%M")
+        return "上次检查：%s · 重启软件会立刻查，常驻期间每 6 小时查一次" % when
 
     # ---------- 校验 ----------
     def _show_error(self, msg: str):

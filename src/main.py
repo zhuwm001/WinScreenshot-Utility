@@ -27,11 +27,25 @@ SERVER_NAME = "WoAiJieTu.SingleInstance.v1"
 
 # 启动后多久去问 GitHub（留出时间给界面先起来）
 UPDATE_DELAY_MS = 6000
-# 同一台机器两次自动检查之间至少隔多久
+# 常驻期间两次自动检查之间至少隔多久（启动那一次不受这个限制）
 UPDATE_INTERVAL = 6 * 3600
 # 运行期间多久看一眼「该不该查了」。托盘程序可能几天不退出，只在启动时查
 # 就永远等不到新版本；这里每小时醒一次，真正请求仍受 UPDATE_INTERVAL 限制。
 UPDATE_POLL_MS = 60 * 60 * 1000
+
+
+def update_due(last_ts, now=None, interval=UPDATE_INTERVAL) -> bool:
+    """常驻期间是否到了该自动检查的时候。
+
+    只用于定时器那一路；启动那一次走 _startup_update_check，不受这里限制。
+    """
+    try:
+        last_ts = int(last_ts or 0)
+    except (TypeError, ValueError):
+        last_ts = 0
+    if last_ts <= 0:
+        return True
+    return (now if now is not None else time.time()) - last_ts >= interval
 
 
 def acquire_single_instance():
@@ -98,7 +112,7 @@ class AppController(QObject):
             self.open_settings()
         self._refresh_tray_menu()
         self._sync_autostart()
-        self._schedule_update_check()
+        self._startup_update_check()
         self._update_timer.start()
 
     def _sync_autostart(self):
@@ -298,15 +312,22 @@ class AppController(QObject):
         self._restore_main = False
 
     # ------------------------------------------------------------ 更新
-    def _schedule_update_check(self):
-        """启动后按频率问一次 GitHub；关掉「自动检查」就完全不问。"""
+    def _startup_update_check(self):
+        """启动后在后台问一次，**不看** 6 小时节流。
+
+        节流时间戳在每次检查时都会刷新（包括用户手动点的那次），如果启动也
+        看它，就会出现「刚手动查过 -> 重启 -> 明明有新版本却不提示」。
+        启动是低频事件，多问一次的成本可以忽略。
+        """
         if not config.get("check_update"):
             return
-        try:
-            last = int(config.get("update_last_check") or 0)
-        except (TypeError, ValueError):
-            last = 0
-        if time.time() - last < UPDATE_INTERVAL:
+        QTimer.singleShot(UPDATE_DELAY_MS, lambda: self.check_updates(silent=True))
+
+    def _schedule_update_check(self):
+        """常驻期间按频率问一次 GitHub；关掉「自动检查」就完全不问。"""
+        if not config.get("check_update"):
+            return
+        if not update_due(config.get("update_last_check")):
             return
         QTimer.singleShot(UPDATE_DELAY_MS, lambda: self.check_updates(silent=True))
 
