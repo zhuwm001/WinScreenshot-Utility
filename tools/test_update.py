@@ -5,6 +5,7 @@
     python tools/test_update.py --live
 """
 import os
+import subprocess
 import sys
 import tempfile
 
@@ -107,6 +108,50 @@ def test_command():
     check("可关闭等待", "ping" not in no_wait)
 
 
+def test_launch_cmdline():
+    """回归：交给 cmd 的那一行不能被 Windows 重新转义。
+
+    以前是 Popen([comspec, "/c", command])，Windows 会按 MSVC 规则把命令里的
+    " 变成 \"，cmd 不认这种转义，`start "" /wait "x.exe"` 退化成 `start \`，
+    弹「Windows 找不到 '\\' 文件」，安装完全没开始。
+    """
+    print("\n== 交给 cmd 的命令行 ==")
+    installer = r"C:\Users\a b\AppData\Local\Temp\wojietu-setup-1.1.4.exe"
+    restart = r"E:\我爱截图\我爱截图.exe"
+
+    line = up.build_install_cmdline(installer, restart, ["--autostart"], 3)
+    check("以 cmd /c 开头", " /c ping -n 4 " in line, line[:46] + "…")
+    check("没有 \\\" 这种转义", '\\"' not in line)
+    check("安装包路径原样带引号", '"%s"' % installer in line)
+    check("重启路径原样带引号", '"%s"' % restart in line)
+
+    # 旧写法确实会被转义：证明这条回归测试抓的是真问题
+    legacy = subprocess.list2cmdline(
+        [os.environ.get("COMSPEC") or "cmd.exe", "/c",
+         up.build_install_command(installer, restart, [], 3)])
+    check("旧写法会被转义（回归证据）", '\\"' in legacy)
+
+    # Popen 必须收到字符串，而不是 list
+    seen = []
+    real_popen = up.subprocess.Popen
+
+    class _Fake:
+        pass
+
+    def _fake(args, **kw):
+        seen.append((args, kw))
+        return _Fake()
+
+    up.subprocess.Popen = _fake
+    try:
+        up.launch_silent_install(installer, restart, [], delay_seconds=0)
+    finally:
+        up.subprocess.Popen = real_popen
+    check("Popen 收到整行字符串", seen and isinstance(seen[0][0], str),
+          type(seen[0][0]).__name__ if seen else "未调用")
+    check("隐藏窗口启动", bool(seen and seen[0][1].get("creationflags", 0) & 0x08000000))
+
+
 def test_local():
     print("\n== 本机环境 ==")
     print("     运行中的 exe : %s" % up.running_exe())
@@ -160,6 +205,7 @@ def main():
     test_notes()
     test_parse()
     test_command()
+    test_launch_cmdline()
     test_local()
     if "--live" in sys.argv:
         test_live()

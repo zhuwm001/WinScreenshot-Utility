@@ -568,15 +568,29 @@ def build_install_command(installer: str, restart_exe: str = "", restart_args=()
     return " & ".join(steps)
 
 
+def build_install_cmdline(installer: str, restart_exe: str = "", restart_args=(),
+                          delay_seconds: int = 3):
+    """交给 CreateProcess 的整行命令：`cmd.exe /c <各步骤>`（纯函数，方便测试）。"""
+    comspec = os.environ.get("COMSPEC") or "cmd.exe"
+    exe = '"%s"' % comspec if " " in comspec else comspec
+    return "%s /c %s" % (exe, build_install_command(
+        installer, restart_exe, restart_args, delay_seconds))
+
+
 def launch_silent_install(installer: str, restart_exe: str = "", restart_args=(),
                           delay_seconds: int = 3):
-    """把安装命令丢给一个隐藏的 cmd 执行；本进程应该马上退出。"""
-    command = build_install_command(installer, restart_exe, restart_args, delay_seconds)
-    comspec = os.environ.get("COMSPEC") or "cmd.exe"
+    """把安装命令丢给一个隐藏的 cmd 执行；本进程应该马上退出。
+
+    这里必须把整行当成 **一个字符串** 交给 Popen。传 list 时 Windows 会按
+    MSVC 规则重新拼命令行，把命令里的 " 变成 \"，而 cmd 不认这种转义：
+    `start "" /wait "C:\\a\\b.exe"` 会退化成 `start \\`，弹「Windows 找不到
+    '\\' 文件」，安装根本不会开始。传字符串则原样进 lpCommandLine，
+    由 cmd 自己解析引号。
+    """
+    cmdline = build_install_cmdline(installer, restart_exe, restart_args,
+                                    delay_seconds)
     flags = 0
     if os.name == "nt":
         flags = 0x08000000 | 0x00000200      # CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP
-    # 整串命令作为 Unicode 参数传进去，不落地临时 .bat —— 中文路径不会有编码问题
-    proc = subprocess.Popen([comspec, "/c", command], close_fds=True,
-                            creationflags=flags)
-    return proc
+    # 不落地临时 .bat —— 中文路径不会有编码问题
+    return subprocess.Popen(cmdline, close_fds=True, creationflags=flags)
