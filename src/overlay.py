@@ -24,6 +24,9 @@ S_SELECTING = 1
 S_SELECTED = 2
 S_DRAWING = 3
 S_RESIZING = 4
+S_TEXT_PRESS = 5     # 按在文字上，还没决定是拖动还是进入编辑
+S_TEXT_MOVE = 6      # 拖动文字
+S_TEXT_WIDTH = 7     # 拖文字左右边框改换行宽度
 
 # 工具
 T_RECT = "rect"
@@ -55,6 +58,39 @@ def _font(size: int, bold: bool = False) -> QFont:
     return f
 
 
+def wrap_text_lines(text: str, fm: QFontMetrics, max_w: float):
+    """把文字按像素宽度折成多行，保留原有的硬换行。
+
+    max_w <= 0 表示不限宽，只按 \\n 切。中文逐字断行，英文优先在空格处断，
+    尽量不把单词劈成两半。
+    """
+    paras = text.split("\n") or [""]
+    if max_w <= 0:
+        return paras
+    out = []
+    for para in paras:
+        if not para:
+            out.append("")
+            continue
+        cur = ""
+        for ch in para:
+            if not cur:
+                cur = ch
+                continue
+            if fm.horizontalAdvance(cur + ch) <= max_w:
+                cur += ch
+                continue
+            cut = cur.rfind(" ")
+            if cut > 0 and cut >= len(cur) - 12:
+                out.append(cur[:cut])
+                cur = cur[cut + 1:] + ch
+            else:
+                out.append(cur)
+                cur = ch
+        out.append(cur)
+    return out
+
+
 class AnnotItem:
     """一个标注对象。
 
@@ -62,7 +98,7 @@ class AnnotItem:
     """
 
     def __init__(self, kind, p1, p2, color, width=3, text="", font_size=FONT_DEFAULT,
-                 bold=False):
+                 bold=False, wrap_w=0.0):
         self.kind = kind
         self.p1 = QPointF(p1)
         self.p2 = QPointF(p2)
@@ -71,6 +107,8 @@ class AnnotItem:
         self.text = text
         self.font_size = font_size
         self.bold = bold
+        # 文字自动换行宽度（逻辑像素）；0 表示不换行，框宽跟着最长那行走
+        self.wrap_w = float(wrap_w or 0.0)
         self.points = [QPointF(p1)] if kind == T_PEN else []
 
     @property
@@ -166,13 +204,14 @@ def paint_item(p: QPainter, item: AnnotItem):
         font = _font(item.font_size, item.bold)
         fm = QFontMetrics(font)
         line_h = fm.lineSpacing()
+        lines = wrap_text_lines(item.text, fm, item.wrap_w)
         # 只有白/黄这类很亮的文字才补一圈贴合笔画的细描边，
         # 描边与笔画同心、没有位移，所以不会出现重影。
         lum = 0.299 * color.red() + 0.587 * color.green() + 0.114 * color.blue()
         halo = QColor(0, 0, 0, 120) if lum > 175 else None
         p.setRenderHint(QPainter.Antialiasing, True)
         p.setRenderHint(QPainter.TextAntialiasing, True)
-        for i, line in enumerate(item.text.split("\n")):
+        for i, line in enumerate(lines):
             if not line:
                 continue
             base = QPointF(item.p1.x(), item.p1.y() + fm.ascent() + i * line_h)
@@ -189,12 +228,17 @@ def paint_item(p: QPainter, item: AnnotItem):
 
 
 def text_rect(item: AnnotItem) -> QRectF:
-    """文字标注的包围盒，用于点击命中判断。"""
+    """文字标注的包围盒，用于点击命中判断和拖动边框。
+
+    wrap_w > 0 时框宽固定为 wrap_w，否则跟着最长那一行走。
+    """
     font = _font(item.font_size, item.bold)
     fm = QFontMetrics(font)
-    lines = item.text.split("\n") or [""]
+    lines = wrap_text_lines(item.text, fm, item.wrap_w)
     w = max((fm.horizontalAdvance(l) for l in lines), default=0)
-    h = fm.lineSpacing() * len(lines)
+    if item.wrap_w:
+        w = max(w, float(item.wrap_w))
+    h = fm.lineSpacing() * max(1, len(lines))
     return QRectF(item.p1.x() - 5, item.p1.y() - 5,
                   max(w, 10) + 10, max(h, fm.lineSpacing()) + 10)
 
@@ -517,6 +561,15 @@ class CaptureOverlay(QWidget):
         self._text_bold = bool(text_bold)
         self._editing_item = None
         self._committing = False
+        self._edit_wrap = 0.0
+
+        # 文字标注的拖动 / 改宽
+        self._hover_item = None
+        self._drag_item = None
+        self._drag_pos = QPoint()
+        self._drag_from = QPointF()
+        self._text_edge = ""
+        self._text_edge_right = 0.0
 
         self._bar = EditorBar(self)
         self._bar.toolChanged.connect(self._on_tool_changed)
@@ -592,6 +645,8 @@ class CaptureOverlay(QWidget):
             paint_item(p, item)
         if self._temp is not None:
             paint_item(p, self._temp)
+        if self._hover_item is not None and self._hover_item in self._items:
+            self._draw_text_frame(p, self._hover_item)
         p.restore()
 
         # 选区边框
@@ -648,6 +703,22 @@ class CaptureOverlay(QWidget):
         for pt in self._handle_points(sel):
             p.drawRect(QRectF(pt.x() - HANDLE_SIZE / 2, pt.y() - HANDLE_SIZE / 2,
                               HANDLE_SIZE, HANDLE_SIZE))
+
+    def _draw_text_frame(self, p: QPainter, item):
+        """鼠标停在文字上时提示「能拖」：虚线框 + 左右两个竖条手柄。"""
+        r = text_rect(item)
+        p.setBrush(Qt.NoBrush)
+        p.setPen(QPen(QColor(74, 134, 255, 200), 1, Qt.DashLine))
+        p.drawRect(r.adjusted(0.5, 0.5, -0.5, -0.5))
+        cy = r.center().y()
+        for x in (r.left(), r.right()):
+            box = QRectF(x - 3, cy - 11, 6, 22)
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(255, 255, 255, 240))
+            p.drawRoundedRect(box, 3, 3)
+            p.setPen(QPen(QColor(74, 134, 255, 230), 1))
+            p.setBrush(Qt.NoBrush)
+            p.drawRoundedRect(box.adjusted(0.5, 0.5, -0.5, -0.5), 3, 3)
 
     @staticmethod
     def _handle_points(sel: QRect):
@@ -719,7 +790,25 @@ class CaptureOverlay(QWidget):
                     self.update()
                     return
                 if self._tool == T_TEXT:
-                    self._start_text(pos, self._text_item_at(pos))
+                    hit = self._text_item_at(pos)
+                    if hit is not None:
+                        edge = self._text_handle_at(pos, hit)
+                        if edge:
+                            # 拖左右边框 -> 改换行宽度
+                            self._state = S_TEXT_WIDTH
+                            self._drag_item = hit
+                            self._text_edge = edge
+                            self._text_edge_right = text_rect(hit).right()
+                            self._bar.hide()
+                            self.update()
+                            return
+                        # 先按着不动，松手时没移动就当作点击进入编辑
+                        self._state = S_TEXT_PRESS
+                        self._drag_item = hit
+                        self._drag_pos = QPoint(pos)
+                        self._drag_from = QPointF(hit.p1)
+                        return
+                    self._start_text(pos, None)
                     return
                 return
 
@@ -753,12 +842,49 @@ class CaptureOverlay(QWidget):
             self.update()
             return
 
+        if self._state == S_TEXT_PRESS:
+            # 移动超过 4px 才当成拖动，否则保持「点击进入编辑」
+            if (pos - self._drag_pos).manhattanLength() >= 4:
+                self._state = S_TEXT_MOVE
+                self.setCursor(Qt.SizeAllCursor)
+                self._move_text(pos)
+            return
+
+        if self._state == S_TEXT_MOVE:
+            self._move_text(pos)
+            return
+
+        if self._state == S_TEXT_WIDTH:
+            self._resize_text(pos)
+            return
+
+        self._update_hover(pos)
         self._update_cursor(pos)
 
     def mouseReleaseEvent(self, event):
         if event.button() != Qt.LeftButton:
             return
         pos = self._clamp(event.pos())
+
+        if self._state == S_TEXT_PRESS:
+            # 全程没移动 -> 当作点击，进入编辑
+            item = self._drag_item
+            self._state = S_SELECTED
+            self._drag_item = None
+            self._hover_item = None
+            if item is not None:
+                self._start_text(QPoint(int(item.p1.x()), int(item.p1.y())), item)
+            self.update()
+            return
+
+        if self._state in (S_TEXT_MOVE, S_TEXT_WIDTH):
+            self._state = S_SELECTED
+            self._drag_item = None
+            self._text_edge = ""
+            self._bar.set_undo_enabled(bool(self._items))
+            self._show_bar()
+            self.update()
+            return
 
         if self._state == S_SELECTING:
             r = QRect(self._origin, pos).normalized()
@@ -830,7 +956,13 @@ class CaptureOverlay(QWidget):
             self.setCursor(cursors.get(h, Qt.CrossCursor))
         elif self._sel.contains(pos):
             if self._tool == T_TEXT:
-                self.setCursor(Qt.IBeamCursor)
+                hit = self._text_item_at(pos)
+                if hit is None:
+                    self.setCursor(Qt.IBeamCursor)
+                elif self._text_handle_at(pos, hit):
+                    self.setCursor(Qt.SizeHorCursor)
+                else:
+                    self.setCursor(Qt.SizeAllCursor)
             else:
                 self.setCursor(Qt.CrossCursor)
         else:
@@ -923,6 +1055,7 @@ class CaptureOverlay(QWidget):
         if kind != T_TEXT and self._text_edit is not None:
             self._commit_text()
         self._tool = kind
+        self._hover_item = None
         self._bar.set_text_mode(kind == T_TEXT)
         if not self._sel.isNull():
             self._show_bar()
@@ -981,6 +1114,64 @@ class CaptureOverlay(QWidget):
                 return item
         return None
 
+    def _text_handle_at(self, pos: QPoint, item) -> str:
+        """命中文字框的左右边框，返回 "l" / "r" / ""。"""
+        r = text_rect(item)
+        if pos.y() < r.top() - 4 or pos.y() > r.bottom() + 4:
+            return ""
+        pad = 7
+        if abs(pos.x() - r.left()) <= pad:
+            return "l"
+        if abs(pos.x() - r.right()) <= pad:
+            return "r"
+        return ""
+
+    def _move_text(self, pos: QPoint):
+        """整段文字跟着鼠标平移，压在选区内。"""
+        item = self._drag_item
+        if item is None:
+            return
+        r = text_rect(item)
+        sel = self._sel
+        x = self._drag_from.x() + (pos.x() - self._drag_pos.x())
+        y = self._drag_from.y() + (pos.y() - self._drag_pos.y())
+        # p1 是文字左上角，包围盒再往外扩 5px
+        lo_x, hi_x = sel.left() + 5, max(sel.left() + 5, sel.right() - r.width() + 5)
+        lo_y, hi_y = sel.top() + 5, max(sel.top() + 5, sel.bottom() - r.height() + 5)
+        item.p1 = QPointF(min(max(x, lo_x), hi_x), min(max(y, lo_y), hi_y))
+        self.update()
+
+    def _resize_text(self, pos: QPoint):
+        """拖左右边框只改换行宽度，高度由内容自己决定。
+
+        包围盒比内容宽 10px（左右各 5px 留白），换算时要扣掉。
+        """
+        item = self._drag_item
+        if item is None:
+            return
+        min_w = 48.0
+        r = text_rect(item)
+        sel = self._sel
+        if self._text_edge == "r":
+            # 让包围盒右边贴住鼠标
+            right = min(max(pos.x(), r.left() + 10 + min_w), sel.right())
+            item.wrap_w = max(min_w, right - r.left() - 10)
+        else:
+            right = min(self._text_edge_right, sel.right())
+            left = min(max(pos.x(), sel.left()), right - 10 - min_w)
+            item.p1 = QPointF(left + 5, item.p1.y())
+            item.wrap_w = right - left - 10
+        self.update()
+
+    def _update_hover(self, pos: QPoint):
+        hit = None
+        if (self._tool == T_TEXT and self._state == S_SELECTED
+                and not self._sel.isNull() and self._text_edit is None):
+            hit = self._text_item_at(pos)
+        if hit is not self._hover_item:
+            self._hover_item = hit
+            self.update()
+
     def _start_text(self, pos: QPoint, item=None):
         """新建或编辑一段文字。item 不为空表示编辑已有的文字。"""
         self._commit_text()
@@ -991,11 +1182,13 @@ class CaptureOverlay(QWidget):
             self._text_size = max(FONT_MIN, min(FONT_MAX, int(item.font_size)))
             self._text_bold = bool(item.bold)
             self._editing_item = item
+            self._edit_wrap = float(item.wrap_w or 0.0)
             initial = item.text
         else:
             self._text_pos = QPointF(pos)
             self._text_color = QColor(self._color)
             self._editing_item = None
+            self._edit_wrap = 0.0
             initial = ""
         self._bar.set_text_style(self._text_size, self._text_bold)
 
@@ -1003,7 +1196,9 @@ class CaptureOverlay(QWidget):
         edit.setFont(_font(self._text_size, self._text_bold))
         edit.setFrameShape(QFrame.NoFrame)
         edit.setAcceptRichText(False)
-        edit.setLineWrapMode(QTextEdit.NoWrap)
+        # 已经拖过宽度的文字，编辑时沿用这个宽度，换行位置才不会跳
+        edit.setLineWrapMode(QTextEdit.WidgetWidth if self._edit_wrap > 0
+                             else QTextEdit.NoWrap)
         edit.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         edit.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         edit.setStyleSheet(self._text_edit_qss())
@@ -1033,12 +1228,25 @@ class CaptureOverlay(QWidget):
             return
         fm = QFontMetrics(_font(self._text_size, self._text_bold))
         lines = edit.toPlainText().split("\n")
-        widest = max((fm.horizontalAdvance(l) for l in lines), default=0)
-        max_w = max(320, min(900, self.width() - 20))
-        w = max(190, min(widest + 30, max_w))
-        h = fm.lineSpacing() * max(1, len(lines)) + 10
-        # 输入框内文字起点与最终绘制位置对齐：偏移 = 边框 1 + 内边距 3 + 1
+        if self._edit_wrap > 0:
+            w = int(self._edit_wrap) + 8
+        else:
+            widest = max((fm.horizontalAdvance(l) for l in lines), default=0)
+            max_w = max(320, min(900, self.width() - 20))
+            w = max(190, min(widest + 30, max_w))
         x = max(0, min(int(self._text_pos.x()) - 5, self.width() - w))
+        # 先定宽度让文档重排，再按重排后的高度定高
+        y = max(0, min(int(self._text_pos.y()) - 5, self.height() - 24))
+        edit.setGeometry(x, y, w, max(24, fm.lineSpacing() + 10))
+        if self._edit_wrap > 0:
+            # 显式给文档定宽，否则未显示的控件不会按新宽度重排
+            doc = edit.document()
+            doc.setDocumentMargin(0)
+            doc.setTextWidth(max(10, w - 8))
+            h = max(int(math.ceil(doc.size().height())) + 8, fm.lineSpacing() + 10)
+        else:
+            h = fm.lineSpacing() * max(1, len(lines)) + 10
+        # 输入框内文字起点与最终绘制位置对齐：偏移 = 边框 1 + 内边距 3 + 1
         y = max(0, min(int(self._text_pos.y()) - 5, self.height() - h))
         edit.setGeometry(x, y, w, h)
 
@@ -1140,6 +1348,8 @@ class CaptureOverlay(QWidget):
         self._state = S_IDLE
         self._items.clear()
         self._temp = None
+        self._hover_item = None
+        self._drag_item = None
         self._bar.set_undo_enabled(False)
         self._bar.hide()
         self.setCursor(Qt.CrossCursor)
