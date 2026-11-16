@@ -120,3 +120,11 @@ python src\main.py
 
 打包需要 PyInstaller 和 Inno Setup 6：`python build_exe.py` 后用 ISCC 编译 `installer.iss`。
 推送 `v*` 标签时，GitHub Actions 会自动构建并发布 Release。
+
+## 许可
+
+源码公开只为方便审阅，**不是开源项目**。安装包可以免费用，但代码不允许复制、
+修改或再分发，也不允许用相似名称发布修改版。完整条款见 [LICENSE](LICENSE)。
+
+This is a source-available project, not open source. Free to use the official
+installer; copying, modifying, or redistributing the source is not permitted.
