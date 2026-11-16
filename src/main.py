@@ -20,7 +20,10 @@ from pin_window import PinWindow
 from screenshot import capture_desktop, set_process_dpi_awareness
 from settings_dialog import SettingsDialog
 from toast import Toast
-from update import (UpdateChecker, launch_silent_install, running_exe)
+from update import (UpdateChecker, clear_pending, cleanup_installers,
+                    install_dir_writable, launch_silent_install, parse_version,
+                    read_pending, running_exe, version_from_installer,
+                    write_pending)
 from update_dialog import MODE_ERROR, MODE_LATEST, MODE_NEW, UpdateDialog
 
 SERVER_NAME = "WoAiJieTu.SingleInstance.v1"
@@ -46,6 +49,20 @@ def update_due(last_ts, now=None, interval=UPDATE_INTERVAL) -> bool:
     if last_ts <= 0:
         return True
     return (now if now is not None else time.time()) - last_ts >= interval
+
+
+def update_outcome(pending, current) -> str:
+    """上一次安装的结果：'done' / 'failed' / ''（没有回执或版本不明）。
+
+    判断依据只有一个 —— 现在跑的版本有没有达到当初要装的版本。
+    所以即使安装过程被杀软拦掉、被用户取消、目录不可写，这里都会如实反映。
+    """
+    if not pending or not isinstance(pending, dict):
+        return ""
+    target = str(pending.get("version") or "").strip()
+    if not target:
+        return ""
+    return "done" if parse_version(current) >= parse_version(target) else "failed"
 
 
 def acquire_single_instance():
@@ -114,6 +131,7 @@ class AppController(QObject):
         self._sync_autostart()
         self._startup_update_check()
         self._update_timer.start()
+        QTimer.singleShot(1200, self._notify_update_result)
 
     def _sync_autostart(self):
         """校正注册表里的启动项，与设置里的开关保持一致。"""
@@ -388,18 +406,65 @@ class AppController(QObject):
         QTimer.singleShot(200, lambda: self.check_updates(silent=False))
 
     def _install_update(self, installer_path: str):
+        # 装之前先落回执：新版本第一次起来时靠它判断「这次到底装成了没有」
+        target = version_from_installer(installer_path)
+        if not target and self._update_dlg is not None:
+            info = getattr(self._update_dlg, "info", None)
+            target = getattr(info, "version", "") or ""
+        write_pending(target, installer_path)
+
+        # 安装目录不可写时别硬静默装 —— 那样会一声不响地失败
+        silent = install_dir_writable(running_exe())
         try:
             # argv[1:] 原样带过去：开机自启时带 --autostart，重启后仍是静默启动
-            launch_silent_install(installer_path, running_exe(), sys.argv[1:])
+            launch_silent_install(installer_path, running_exe(), sys.argv[1:],
+                                  silent=silent)
         except Exception as e:
+            clear_pending()
             QMessageBox.warning(
                 self.win if self.win.isVisible() else None, "无法开始安装",
                 "启动安装程序失败：%s\n\n安装包已下载到：\n%s" % (e, installer_path))
             return
-        Toast.show_toast("正在安装新版本", "软件会自动关闭并重新打开。",
-                         kind="check", timeout=2500)
+        if silent:
+            Toast.show_toast("正在安装新版本", "软件会自动关闭并重新打开。",
+                             kind="check", timeout=2500)
+        else:
+            Toast.show_toast("请在安装向导里点下一步",
+                             "当前目录需要管理员权限，无法全自动安装。",
+                             kind="warn", timeout=6000)
         # 留一点时间让界面刷完再退出；安装程序自己会等 3 秒
         QTimer.singleShot(300, self.quit_app)
+
+    def _notify_update_result(self):
+        """上一次更新之后第一次启动：明确告诉用户「成了」还是「没成」。
+
+        安装是不是真的跑完了，只有新版本起来才知道 —— 所以判断放在这里，
+        而不是在点「立即更新」的时候。
+        """
+        pending = read_pending()
+        if not pending:
+            cleanup_installers()
+            return
+        installer = str(pending.get("installer") or "")
+        state = update_outcome(pending, APP_VERSION)
+        clear_pending()
+
+        if state == "done":
+            cleanup_installers()
+            QTimer.singleShot(400, lambda: Toast.show_toast(
+                "更新完成", "已升级到 %s，设置和截图习惯都保留着。" % APP_VERSION,
+                kind="check", timeout=4500))
+            return
+        if state != "failed":
+            cleanup_installers()
+            return
+
+        # 还停在旧版本：安装流程没走完（被杀软拦下、被取消、目录不可写…）
+        cleanup_installers(keep=installer)
+        tip = ("安装包已保存，可手动双击安装：\n%s" % installer
+               if installer else "请到发布页重新下载安装包。")
+        QTimer.singleShot(400, lambda: Toast.show_toast(
+            "上次更新没有完成", tip, kind="warn", timeout=8000))
 
     # ------------------------------------------------------------ 设置
     def open_settings(self):

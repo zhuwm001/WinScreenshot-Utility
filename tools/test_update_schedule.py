@@ -83,6 +83,23 @@ def main_():
     txt = SettingsDialog._last_check_text(FakeCfg(int(old.timestamp())))
     check("更早显示完整日期", "2020-01-02" in txt, txt)
 
+    print("\n== 更新结果回执（决定弹不弹「更新完成」） ==")
+    check("没有回执", main.update_outcome({}, "1.1.6") == "")
+    check("版本不明不乱报", main.update_outcome({"version": ""}, "1.1.6") == "")
+    check("装到了目标版本 -> 成功",
+          main.update_outcome({"version": "1.1.6"}, "1.1.6") == "done")
+    check("跨版本（比目标还新）-> 成功",
+          main.update_outcome({"version": "1.1.6"}, "1.2.0") == "done")
+    check("还停在旧版本 -> 失败",
+          main.update_outcome({"version": "1.1.6"}, "1.1.4") == "failed")
+    check("回到更早版本也算失败",
+          main.update_outcome({"version": "1.1.10"}, "1.1.9") == "failed")
+
+    print("\n== 接线检查（防止改着改着断掉） ==")
+    check("启动时会回报更新结果", "self._notify_update_result)" in src)
+    check("安装前会落回执", "write_pending(" in src)
+    check("安装目录不可写时不硬静默", "install_dir_writable(" in src)
+
     print("\n通过 %d，失败 %d" % (len(PASS), len(FAIL)))
     if FAIL:
         for n in FAIL:

@@ -11,6 +11,7 @@
 只读令牌绕过，但令牌会随 exe 分发出去，不安全，不建议。
 """
 import hashlib
+import json
 import os
 import re
 import subprocess
@@ -218,6 +219,117 @@ def running_exe() -> str:
     return os.path.abspath(sys.argv[0])
 
 
+def update_dir() -> str:
+    """存安装包和状态文件的目录。
+
+    不用 %TEMP%：那是系统清理工具、磁盘清理和部分杀软最爱扫的地方，
+    安装包在里面可能没等安装就被删掉/隔离，且不同用户/会话还可能变。
+    %LOCALAPPDATA%\\我爱截图\\update 跟着用户走，稳定可写。
+    """
+    base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+    d = os.path.join(base, APP_NAME, "update")
+    try:
+        os.makedirs(d, exist_ok=True)
+    except Exception:
+        return tempfile.gettempdir()
+    return d
+
+
+def comspec() -> str:
+    """cmd.exe 的绝对路径。
+
+    COMSPEC 被改坏或没继承到的环境是存在的（某些启动器、精简版系统），
+    所以再兜一层 SystemRoot，最后才退回 PATH 里的 cmd.exe。
+    """
+    cands = [os.environ.get("COMSPEC") or "",
+             os.path.join(os.environ.get("SystemRoot") or r"C:\Windows",
+                          "System32", "cmd.exe"),
+             os.path.join(os.environ.get("windir") or r"C:\Windows",
+                          "System32", "cmd.exe")]
+    for c in cands:
+        if c and os.path.isfile(c):
+            return c
+    return "cmd.exe"
+
+
+def install_dir_writable(target_exe: str = "") -> bool:
+    """安装目录当前用户能不能直接写。
+
+    写不进去就别指望静默安装（它会一声不响地失败），改成带界面的安装，
+    至少用户能看到错误或自己处理。
+    """
+    exe = target_exe or running_exe()
+    folder = os.path.dirname(os.path.abspath(exe))
+    probe = os.path.join(folder, ".wojietu-write-probe")
+    try:
+        with open(probe, "wb") as f:
+            f.write(b"1")
+        os.remove(probe)
+        return True
+    except Exception:
+        return False
+
+
+# ---------------------------------------------------------------- 安装回执
+# 装之前落一个 pending.json，新版本第一次起来时据此判断「上次更新到底成没成」，
+# 再也不需要用户自己猜、也不需要日志。
+def pending_path() -> str:
+    return os.path.join(update_dir(), "pending.json")
+
+
+def write_pending(version: str, installer: str) -> str:
+    path = pending_path()
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"version": version or "", "installer": installer or ""},
+                      f, ensure_ascii=False)
+    except Exception:
+        return ""
+    return path
+
+
+def read_pending() -> dict:
+    try:
+        with open(pending_path(), "r", encoding="utf-8-sig") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def clear_pending():
+    try:
+        os.remove(pending_path())
+    except Exception:
+        pass
+
+
+def version_from_installer(path: str) -> str:
+    """从下载的文件名里取版本号（wojietu-setup-1.1.6.exe -> 1.1.6）。"""
+    m = re.search(r"wojietu-setup-(.+)\.exe$", os.path.basename(path or ""),
+                  re.IGNORECASE)
+    return m.group(1) if m else ""
+
+
+def cleanup_installers(keep: str = ""):
+    """删掉残留的旧安装包（一个 30MB 压在盘里没必要）。"""
+    folder = update_dir()
+    keep = os.path.basename(keep or "").lower()
+    try:
+        for name in os.listdir(folder):
+            low = name.lower()
+            if not (low.startswith("wojietu-setup-") and low.endswith(".exe")):
+                continue
+            if keep and low == keep:
+                continue
+            try:
+                os.remove(os.path.join(folder, name))
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
 # ---------------------------------------------------------------- 网络
 def _token() -> str:
     return (os.environ.get("WOJIETU_GITHUB_TOKEN") or "").strip()
@@ -392,7 +504,7 @@ class InstallerDownloader(QObject):
             # 没有校验值就没法确认下到的东西是不是原包，宁可不装
             self.failed.emit("更新清单里没有 sha256 校验值，已拒绝下载。")
             return
-        dest_dir = dest_dir or tempfile.gettempdir()
+        dest_dir = dest_dir or update_dir()
         os.makedirs(dest_dir, exist_ok=True)
         self._verified = False
         # 文件名保持纯 ASCII：中文路径交给命令行处理容易出编码问题
@@ -547,38 +659,44 @@ def sha256_file(path: str) -> str:
 
 # ---------------------------------------------------------------- 安装
 def build_install_command(installer: str, restart_exe: str = "", restart_args=(),
-                          delay_seconds: int = 3):
+                          delay_seconds: int = 3, silent: bool = True):
     """拼出交给 cmd 的那一串命令（纯函数，方便测试）。
 
-    先等几秒让本进程彻底退出（否则文件被占用装不上），
-    再 /VERYSILENT 静默安装，装完把新版拉起来。
+    先等几秒让本进程彻底退出（否则文件被占用装不上），再安装，
+    装完把新版拉起来。silent=False 时保留安装向导界面（万一目录不可写，
+    至少用户能看到提示，而不是毫无反应）。
     """
     installer = os.path.abspath(installer)
     restart_exe = os.path.abspath(restart_exe or running_exe())
 
     steps = []
     if delay_seconds > 0:
-        # 用 ping 而不是 timeout：没有控制台的进程里 timeout 会直接报错
+        # 用 ping 而不是 timeout：没有控制台的进程里 timeout 会直接报错。
+        # 注意步骤之间用 & 连接，ping 万一不可用也不会中断后面的安装。
         steps.append("ping -n %d 127.0.0.1 >nul" % (delay_seconds + 1))
-    steps.append(
-        'start "" /wait "%s" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /NOCANCEL '
-        '/CLOSEAPPLICATIONS /LOG="%%TEMP%%\\wojietu-update.log"' % installer)
-    args = " ".join('"%s"' % a if " " in str(a) else str(a) for a in (restart_args or ()))
-    steps.append('start "" "%s"%s' % (restart_exe, (" " + args) if args else ""))
+    if silent:
+        mode = ("/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /NOCANCEL "
+                "/CLOSEAPPLICATIONS")
+    else:
+        mode = "/NORESTART /NOCANCEL /CLOSEAPPLICATIONS"
+    steps.append('start "" /wait "%s" %s "/LOG=%%TEMP%%\\wojietu-update.log"'
+                 % (installer, mode))
+    argstr = " ".join('"%s"' % a if " " in str(a) else str(a) for a in (restart_args or ()))
+    steps.append('start "" "%s"%s' % (restart_exe, (" " + argstr) if argstr else ""))
     return " & ".join(steps)
 
 
 def build_install_cmdline(installer: str, restart_exe: str = "", restart_args=(),
-                          delay_seconds: int = 3):
+                          delay_seconds: int = 3, silent: bool = True):
     """交给 CreateProcess 的整行命令：`cmd.exe /c <各步骤>`（纯函数，方便测试）。"""
-    comspec = os.environ.get("COMSPEC") or "cmd.exe"
-    exe = '"%s"' % comspec if " " in comspec else comspec
+    exe = comspec()
+    exe = '"%s"' % exe if " " in exe else exe
     return "%s /c %s" % (exe, build_install_command(
-        installer, restart_exe, restart_args, delay_seconds))
+        installer, restart_exe, restart_args, delay_seconds, silent))
 
 
 def launch_silent_install(installer: str, restart_exe: str = "", restart_args=(),
-                          delay_seconds: int = 3):
+                          delay_seconds: int = 3, silent: bool = True):
     """把安装命令丢给一个隐藏的 cmd 执行；本进程应该马上退出。
 
     这里必须把整行当成 **一个字符串** 交给 Popen。传 list 时 Windows 会按
@@ -588,7 +706,7 @@ def launch_silent_install(installer: str, restart_exe: str = "", restart_args=()
     由 cmd 自己解析引号。
     """
     cmdline = build_install_cmdline(installer, restart_exe, restart_args,
-                                    delay_seconds)
+                                    delay_seconds, silent)
     flags = 0
     if os.name == "nt":
         flags = 0x08000000 | 0x00000200      # CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP

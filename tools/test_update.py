@@ -5,6 +5,7 @@
     python tools/test_update.py --live
 """
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -152,6 +153,39 @@ def test_launch_cmdline():
     check("隐藏窗口启动", bool(seen and seen[0][1].get("creationflags", 0) & 0x08000000))
 
 
+def test_install_helpers():
+    """安装回执、安装包目录、静默/非静默两套参数。"""
+    print("\n== 安装回执与路径 ==")
+    d = tempfile.mkdtemp(prefix="wojietu-test-")
+    real = up.update_dir
+    up.update_dir = lambda: d
+    try:
+        check("写回执", bool(up.write_pending("1.2.0", r"C:\a\wojietu-setup-1.2.0.exe")))
+        got = up.read_pending()
+        check("读回执", got.get("version") == "1.2.0", str(got))
+        up.clear_pending()
+        check("清回执", up.read_pending() == {})
+
+        for n in ("wojietu-setup-1.1.0.exe", "wojietu-setup-1.1.1.exe", "note.txt"):
+            with open(os.path.join(d, n), "wb") as f:
+                f.write(b"x")
+        up.cleanup_installers(keep="wojietu-setup-1.1.1.exe")
+        left = sorted(os.listdir(d))
+        check("只留正在用的安装包", left == ["note.txt", "wojietu-setup-1.1.1.exe"], str(left))
+    finally:
+        up.update_dir = real
+        shutil.rmtree(d, ignore_errors=True)
+
+    check("从文件名取版本", up.version_from_installer(r"C:\x\wojietu-setup-1.1.6.exe") == "1.1.6")
+    check("别的文件名取不到版本", up.version_from_installer(r"C:\x\a.exe") == "")
+    check("cmd 路径真实存在", os.path.isfile(up.comspec()), up.comspec())
+    check("安装目录可写", up.install_dir_writable())
+
+    ui = up.build_install_command(r"C:\a\b.exe", r"C:\c\d.exe", [], 0, silent=False)
+    check("非静默不带 /VERYSILENT", "/VERYSILENT" not in ui and "/SUPPRESSMSGBOXES" not in ui)
+    check("非静默仍会拉起新版", ui.rstrip().endswith('"C:\\c\\d.exe"'), ui[-24:])
+
+
 def test_local():
     print("\n== 本机环境 ==")
     print("     运行中的 exe : %s" % up.running_exe())
@@ -206,6 +240,7 @@ def main():
     test_parse()
     test_command()
     test_launch_cmdline()
+    test_install_helpers()
     test_local()
     if "--live" in sys.argv:
         test_live()
