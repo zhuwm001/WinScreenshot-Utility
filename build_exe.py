@@ -1,9 +1,12 @@
 # -*- coding: utf-8 -*-
 """一键打包：PyInstaller 生成 dist/我爱截图/，供 Inno Setup 打包成安装程序。"""
 import os
+import re
 import shutil
 import subprocess
 import sys
+
+import PyQt5
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 SRC = os.path.join(ROOT, "src")
@@ -11,8 +14,30 @@ ASSETS = os.path.join(ROOT, "assets")
 WORK = os.path.join(ROOT, "build", "pyi")
 DIST = os.path.join(ROOT, "dist")
 APP_NAME = "我爱截图"
-# 版本号可用环境变量 APP_VERSION 覆盖（CI 里按 tag 传入），默认 1.1.1
-VERSION = (os.environ.get("APP_VERSION") or "1.1.1").strip()
+QT_BIN = os.path.join(os.path.dirname(PyQt5.__file__), "Qt5", "bin")
+
+# Qt 5.15 建立 HTTPS 连接时会动态加载 OpenSSL 的两个库。
+# PyInstaller 只会带上 libcrypto，漏掉 libssl —— 结果装好的软件一检查更新就报
+# "TLS initialization failed"，源码里跑却完全正常（PyQt5 的 bin 目录里两个都有）。
+# 而且这两个库只认 exe 同级目录，放进 _internal 一样找不到，所以打包后手动复制。
+OPENSSL_DLLS = (
+    "libssl-1_1-x64.dll",
+    "libcrypto-1_1-x64.dll",
+)
+
+
+def _app_version() -> str:
+    """默认版本号直接读源码，免得打包脚本里的数字和 app_config 对不上。"""
+    try:
+        with open(os.path.join(SRC, "app_config.py"), encoding="utf-8-sig") as f:
+            m = re.search(r'APP_VERSION\s*=\s*"([^"]+)"', f.read())
+            return m.group(1) if m else "0.0.0"
+    except OSError:
+        return "0.0.0"
+
+
+# 版本号可用环境变量 APP_VERSION 覆盖（CI 里按 tag 传入），默认跟源码一致
+VERSION = (os.environ.get("APP_VERSION") or _app_version()).strip()
 
 
 def _version_parts(text):
@@ -79,18 +104,36 @@ def main():
         "--workpath", WORK,
         "--specpath", WORK,
         "--log-level", "WARN",
-        os.path.join(SRC, "main.py"),
     ]
+    cmd.append(os.path.join(SRC, "main.py"))
     print("running:", " ".join(cmd))
     result = subprocess.run(cmd, cwd=ROOT)
     if result.returncode != 0:
         print("PyInstaller 失败，退出码", result.returncode)
         return result.returncode
 
+    # Qt 的 OpenSSL 是运行时用 LoadLibrary 现找的，只认 exe 所在目录 ——
+    # 放进 _internal 它会视而不见。缺了这两个库，装好的软件一检查更新就报
+    # "TLS initialization failed"。约 4.5 MB。
+    for name in OPENSSL_DLLS:
+        src_dll = os.path.join(QT_BIN, name)
+        if os.path.exists(src_dll):
+            shutil.copy2(src_dll, os.path.join(DIST, APP_NAME, name))
+
     exe = os.path.join(DIST, APP_NAME, APP_NAME + ".exe")
     if not os.path.exists(exe):
         print("未找到生成的 exe:", exe)
         return 1
+
+    # 少了 libssl 的包装上去也「能启动」，只是检查更新永远报 TLS 初始化失败，
+    # 所以在这里直接卡住，别让它流到 Release 里。
+    bundle = os.path.join(DIST, APP_NAME)
+    missing = [n for n in OPENSSL_DLLS
+               if not os.path.exists(os.path.join(bundle, n))]
+    if missing:
+        print("打包产物缺少 %s，装好后检查更新会报 TLS 失败。" % ", ".join(missing))
+        return 1
+
     size = os.path.getsize(exe) / 1024 / 1024
     total = sum(
         os.path.getsize(os.path.join(dp, f))

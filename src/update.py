@@ -265,6 +265,20 @@ def _http_hint(status: int) -> str:
     return "GitHub 返回 HTTP %d。" % status
 
 
+def _network_error(detail: str) -> str:
+    """把 Qt 的英文错误翻成人话；TLS 那条最容易让人以为是网络断了。"""
+    detail = detail or "未知错误"
+    low = detail.lower()
+    if "tls initialization" in low or "ssl handshake" in low:
+        return ("无法建立加密连接（%s）。请确认系统时间正确、网络能访问 GitHub；"
+                "如果用了代理，确认代理支持 HTTPS。" % detail)
+    if "host not found" in low or "unknown error" in low:
+        return "解析不到 GitHub 域名（DNS 失败），请检查网络或代理设置。"
+    if "connection refused" in low or "connection closed" in low:
+        return "连接被中断（%s），可能是代理或防火墙拦截。" % detail
+    return "网络连接失败：%s" % detail
+
+
 class UpdateChecker(QObject):
     """异步检查一次最新版本。三种结果三选一，不会都发。
 
@@ -322,7 +336,7 @@ class UpdateChecker(QObject):
             self.failed.emit(_http_hint(int(status)))
             return
         if err:
-            self.failed.emit("网络连接失败：%s" % reply.errorString())
+            self.failed.emit(_network_error(reply.errorString()))
             return
 
         try:

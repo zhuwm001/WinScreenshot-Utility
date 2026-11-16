@@ -29,6 +29,9 @@ SERVER_NAME = "WoAiJieTu.SingleInstance.v1"
 UPDATE_DELAY_MS = 6000
 # 同一台机器两次自动检查之间至少隔多久
 UPDATE_INTERVAL = 6 * 3600
+# 运行期间多久看一眼「该不该查了」。托盘程序可能几天不退出，只在启动时查
+# 就永远等不到新版本；这里每小时醒一次，真正请求仍受 UPDATE_INTERVAL 限制。
+UPDATE_POLL_MS = 60 * 60 * 1000
 
 
 def acquire_single_instance():
@@ -62,6 +65,10 @@ class AppController(QObject):
         self._hide_rect = QRect()
         self._checker = None
         self._update_dlg = None
+        # 常驻托盘时也要持续发现新版本，不能只靠「下次启动」
+        self._update_timer = QTimer(self)
+        self._update_timer.setInterval(UPDATE_POLL_MS)
+        self._update_timer.timeout.connect(self._schedule_update_check)
 
         self.win = MainWindow(config.get("hotkey"))
         self.win.capture_requested.connect(self.start_capture)
@@ -92,6 +99,7 @@ class AppController(QObject):
         self._refresh_tray_menu()
         self._sync_autostart()
         self._schedule_update_check()
+        self._update_timer.start()
 
     def _sync_autostart(self):
         """校正注册表里的启动项，与设置里的开关保持一致。"""
