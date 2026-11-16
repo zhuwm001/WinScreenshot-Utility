@@ -33,8 +33,8 @@ FAKE_RELEASE = {
     "html_url": "https://github.com/zhuwm001/WinScreenshot-Utility/releases/tag/v1.1.0",
     "published_at": "2026-11-15T13:20:00Z",
     "assets": [
-        {"name": "我爱截图_免安装版_v1.1.0.zip", "size": 1234,
-         "browser_download_url": "https://x/portable.zip"},
+        {"name": "checksums.zip", "size": 1234,
+         "browser_download_url": "https://x/checksums.zip"},
         {"name": "我爱截图_安装包_v1.1.0.exe", "size": 29000000,
          "browser_download_url": "https://x/setup.exe",
          "digest": "sha256:abc"},
@@ -110,9 +110,7 @@ def test_command():
 def test_local():
     print("\n== 本机环境 ==")
     print("     运行中的 exe : %s" % up.running_exe())
-    print("     安装目录     : %s" % (up.installed_dir() or "（未安装）"))
-    print("     是否安装版   : %s" % up.is_installed_copy())
-    check("安装目录探测不抛异常", isinstance(up.installed_dir(), str))
+    check("running_exe 返回绝对路径", os.path.isabs(up.running_exe()))
 
     with tempfile.NamedTemporaryFile(delete=False, suffix=".bin") as f:
         f.write(b"MZ" + b"x" * 1000)

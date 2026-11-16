@@ -43,12 +43,6 @@ ALLOWED_HOSTS = (
     "github-releases.githubusercontent.com",
 )
 
-# Inno Setup 卸载登记项里的 AppId，用来查「当前这份是不是安装上去的」
-UNINSTALL_KEY = (
-    r"Software\Microsoft\Windows\CurrentVersion\Uninstall"
-    r"\{A7C31E55-8D2B-4F1E-9C3A-7B6E5D4F2A10}_is1"
-)
-
 
 # ---------------------------------------------------------------- 版本号
 _NUM_RE = re.compile(r"(\d+(?:\.\d+)*)")
@@ -216,32 +210,12 @@ def url_allowed(url: str) -> bool:
     return any(host == h or host.endswith("." + h) for h in ALLOWED_HOSTS)
 
 
-# ---------------------------------------------------------------- 已安装？
-def installed_dir() -> str:
-    """读卸载登记项里的安装目录；没装过就返回空串。"""
-    try:
-        import winreg
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, UNINSTALL_KEY) as k:
-            value, _ = winreg.QueryValueEx(k, "InstallLocation")
-            return (value or "").rstrip("\\/")
-    except Exception:
-        return ""
-
-
+# ---------------------------------------------------------------- 路径
 def running_exe() -> str:
+    """当前运行的可执行文件路径（源码运行时是脚本本身）。"""
     if getattr(sys, "frozen", False):
         return os.path.abspath(sys.executable)
     return os.path.abspath(sys.argv[0])
-
-
-def is_installed_copy() -> bool:
-    """当前跑的是不是安装版（而不是解压出来的免安装版）。"""
-    target = installed_dir()
-    if not target:
-        return False
-    here = os.path.dirname(running_exe())
-    norm = lambda p: os.path.normcase(os.path.normpath(p))
-    return norm(here) == norm(target)
 
 
 # ---------------------------------------------------------------- 网络

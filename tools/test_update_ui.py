@@ -37,7 +37,7 @@ def check(name, ok, detail=""):
         print("  [FAIL] %s%s" % (name, ("  " + detail) if detail else ""))
 
 
-def fake_info(portable_ok=True):
+def fake_info():
     return up.ReleaseInfo(
         version="1.1.0",
         tag="v1.1.0",
@@ -62,13 +62,12 @@ def main():
     app = QApplication(sys.argv)
 
     print("更新界面自检  软件版本 %s" % APP_VERSION)
-    print("  屏幕缩放 %s  安装版=%s"
-          % ([round(s.devicePixelRatio(), 2) for s in app.screens()], up.is_installed_copy()))
+    print("  屏幕缩放 %s"
+          % [round(s.devicePixelRatio(), 2) for s in app.screens()])
 
-    # ---------------- 有新版本（安装版） ----------------
+    # ---------------- 有新版本 ----------------
     print("\n== 有新版本 ==")
     dlg = ud.UpdateDialog(info=fake_info(), mode=ud.MODE_NEW)
-    dlg._portable = False
     dlg._fill()
     check("标题带版本号", "1.1.0" in dlg.lbl_title.text(), dlg.lbl_title.text())
     check("副标题显示当前版本", APP_VERSION in dlg.lbl_sub.text(), dlg.lbl_sub.text())
@@ -103,15 +102,6 @@ def main():
     check("进度条收起", dlg2.bar.isHidden())
     dlg2.close()
 
-    # ---------------- 免安装版 ----------------
-    print("\n== 免安装版（只给下载页） ==")
-    dlg3 = ud.UpdateDialog(info=fake_info(), mode=ud.MODE_NEW)
-    dlg3._portable = True
-    dlg3._fill()
-    check("按钮改成下载安装包", dlg3.btn_go.text() == "下载安装包", dlg3.btn_go.text())
-    check("正文提示免安装版", "免安装版" in dlg3.box.toPlainText())
-    dlg3.close()
-
     # ---------------- 已是最新 / 失败 ----------------
     print("\n== 已是最新 ==")
     dlg4 = ud.UpdateDialog(mode=ud.MODE_LATEST)
@@ -143,7 +133,6 @@ def main():
     outdir = os.path.join(ROOT, "build", "update_ui")
     os.makedirs(outdir, exist_ok=True)
     shot = ud.UpdateDialog(info=fake_info(), mode=ud.MODE_NEW)
-    shot._portable = False
     shot._fill()
     shot.show()
     app.processEvents()

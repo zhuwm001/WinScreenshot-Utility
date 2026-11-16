@@ -14,7 +14,7 @@ from PyQt5.QtGui import QDesktopServices
 
 import theme
 from app_config import APP_NAME, APP_VERSION
-from update import InstallerDownloader, is_installed_copy
+from update import InstallerDownloader
 
 MODE_NEW = "new"
 MODE_LATEST = "latest"
@@ -64,7 +64,6 @@ class UpdateDialog(QDialog):
         self._error_text = message or ""
         self._downloader = None
         self._busy = False
-        self._portable = not is_installed_copy()
 
         self.setWindowTitle("检查更新 - %s" % APP_NAME)
         self.setStyleSheet(theme.dialog_qss() + self._extra_qss())
@@ -194,10 +193,6 @@ class UpdateDialog(QDialog):
         if not info or not info.has_installer:
             text += "\n\n⚠ 这个版本没有附带安装包，只能到发布页手动下载。"
             self.btn_go.setText("打开发布页")
-        elif self._portable:
-            text += ("\n\n当前运行的是免安装版。点「下载安装包」会打开下载页，"
-                     "装好之后就能自动更新了。")
-            self.btn_go.setText("下载安装包")
         else:
             self.btn_go.setText("立即更新")
         self.box.setPlainText(text)
@@ -243,7 +238,7 @@ class UpdateDialog(QDialog):
         # 已最新 / 失败 两种状态下按钮已换成别的处理
         if self.mode != MODE_NEW:
             return
-        if self.info is None or not self.info.has_installer or self._portable:
+        if self.info is None or not self.info.has_installer:
             self._open_page()
             return
         self._start_download()
