@@ -10,6 +10,8 @@ from PyQt5.QtGui import (
 from PyQt5.QtWidgets import QApplication
 
 WHITE = QColor(255, 255, 255)
+# 「发现新版本」徽标用的绿色，比调色板里的绿略深一点，浅底上更清楚
+UPDATE_GREEN = QColor("#22C55E")
 
 
 def _dpr() -> float:
@@ -184,6 +186,23 @@ def _draw(p: QPainter, kind: str, s: float, color: QColor, w: float):
     elif kind == "check":
         p.drawLine(QPointF(pad, s * 0.52), QPointF(s * 0.42, s * 0.76))
         p.drawLine(QPointF(s * 0.42, s * 0.76), QPointF(s - pad * 0.8, s * 0.26))
+
+    elif kind == "update":
+        # 绿色圆底 + 白色向下箭头：有新版本时的提示徽标
+        p.setPen(Qt.NoPen)
+        p.setBrush(UPDATE_GREEN)
+        p.drawEllipse(QRectF(0.4, 0.4, s - 0.8, s - 0.8))
+
+        cx = s / 2.0
+        top, bottom = s * 0.30, s * 0.66
+        head = s * 0.15
+        pen = QPen(WHITE, max(1.5, s * 0.11), Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
+        p.setPen(pen)
+        p.setBrush(Qt.NoBrush)
+        p.drawLine(QPointF(cx, top), QPointF(cx, bottom))
+        p.drawLine(QPointF(cx - head, bottom - head), QPointF(cx, bottom))
+        p.drawLine(QPointF(cx + head, bottom - head), QPointF(cx, bottom))
+        p.drawLine(QPointF(cx - s * 0.20, s * 0.80), QPointF(cx + s * 0.20, s * 0.80))
 
     elif kind == "tray":
         # 托盘槽 + 向下的箭头（表示收进托盘）

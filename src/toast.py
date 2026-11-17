@@ -66,6 +66,11 @@ class Toast(QWidget):
         self._closing = False
         self._anim_in = None
         self._anim_out = None
+        # 用挂在自身上的定时器：卡片提前关掉时它一起销毁，
+        # 不会像 QTimer.singleShot 那样回头调用已删除的对象
+        self._timer = QTimer(self)
+        self._timer.setSingleShot(True)
+        self._timer.timeout.connect(self.dismiss)
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(SHADOW, SHADOW, SHADOW, SHADOW)
@@ -160,7 +165,7 @@ class Toast(QWidget):
         anim.start()
         self._anim_in = anim
 
-        QTimer.singleShot(self._timeout, self.dismiss)
+        self._timer.start(self._timeout)
 
     def dismiss(self):
         if self._closing:

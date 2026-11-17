@@ -65,6 +65,17 @@ def update_outcome(pending, current) -> str:
     return "done" if parse_version(current) >= parse_version(target) else "failed"
 
 
+def tray_tip(hotkey: str):
+    """隐藏到托盘后的提示文案（纯函数，方便测试）。"""
+    hk = (hotkey or "").strip()
+    if hk:
+        text = ("程序仍在后台运行，截图快捷键 %s 可以照常使用；"
+                "双击托盘图标可重新打开窗口。" % hk)
+    else:
+        text = "程序仍在后台运行，双击托盘图标可重新打开窗口。"
+    return "已隐藏到托盘", text
+
+
 def acquire_single_instance():
     """已有实例在运行时唤醒它并退出；否则返回监听中的 server。"""
     sock = QLocalSocket()
@@ -96,6 +107,8 @@ class AppController(QObject):
         self._hide_rect = QRect()
         self._checker = None
         self._update_dlg = None
+        # 已经查到但还没安装的新版本：主界面和设置页靠它亮绿箭头
+        self._available_update = None
         # 常驻托盘时也要持续发现新版本，不能只靠「下次启动」
         self._update_timer = QTimer(self)
         self._update_timer.setInterval(UPDATE_POLL_MS)
@@ -104,6 +117,7 @@ class AppController(QObject):
         self.win = MainWindow(config.get("hotkey"))
         self.win.capture_requested.connect(self.start_capture)
         self.win.settings_requested.connect(self.open_settings)
+        self.win.update_requested.connect(self.show_update)
         self.win.hide_requested.connect(self.hide_to_tray)
         self.win.quit_requested.connect(self.quit_app)
         self.win.close_requested.connect(self.on_main_close)
@@ -210,10 +224,9 @@ class AppController(QObject):
 
     def hide_to_tray(self):
         self.win.hide()
-        if not getattr(self, "_tray_tip_shown", False):
-            self._tray_tip_shown = True
-            Toast.show_toast("已隐藏到托盘", "程序在桌面右下角继续运行，双击托盘图标可重新打开。",
-                             kind="info", timeout=3000)
+        # 每次隐藏都给提示：托盘程序可能几天不重启，只提示第一次等于没提示
+        title, text = tray_tip(config.get("hotkey"))
+        Toast.show_toast(title, text, kind="info", timeout=3200)
 
     def on_main_close(self):
         if config.get("close_action") == "exit":
@@ -361,7 +374,7 @@ class AppController(QObject):
         self._checker.failed.connect(lambda msg: self._on_update_failed(msg, silent))
         self._checker.check(APP_VERSION)
         if not silent:
-            Toast.show_toast("正在检查更新", "正在连接 GitHub…", kind="info", timeout=2000)
+            Toast.show_toast("正在检查更新", "正在获取最新版本信息…", kind="info", timeout=2000)
 
     def _drop_checker(self):
         checker = self._checker
@@ -369,12 +382,19 @@ class AppController(QObject):
         if checker is not None:
             checker.deleteLater()
 
+    def _set_update_available(self, info):
+        """记住「有没有新版本」，主界面与设置页的绿箭头都跟着它走。"""
+        self._available_update = info
+        self.win.set_update_available(info)
+
     def _on_update_found(self, info):
         self._drop_checker()
+        self._set_update_available(info)
         self._open_update_dialog(info, MODE_NEW)
 
     def _on_update_latest(self, version, silent):
         self._drop_checker()
+        self._set_update_available(None)
         if not silent:
             self._open_update_dialog(None, MODE_LATEST)
 
@@ -405,6 +425,17 @@ class AppController(QObject):
     def _retry_check(self):
         QTimer.singleShot(200, lambda: self.check_updates(silent=False))
 
+    def show_update(self):
+        """点绿箭头：已经知道有新版本就直接开窗口，否则现查一次。"""
+        if self._update_dlg is not None:
+            self._update_dlg.raise_()
+            self._update_dlg.activateWindow()
+            return
+        if self._available_update is not None:
+            self._open_update_dialog(self._available_update, MODE_NEW)
+        else:
+            self.check_updates(silent=False)
+
     def _install_update(self, installer_path: str):
         # 装之前先落回执：新版本第一次起来时靠它判断「这次到底装成了没有」
         target = version_from_installer(installer_path)
@@ -421,9 +452,15 @@ class AppController(QObject):
                                   silent=silent)
         except Exception as e:
             clear_pending()
-            QMessageBox.warning(
-                self.win if self.win.isVisible() else None, "无法开始安装",
-                "启动安装程序失败：%s\n\n安装包已下载到：\n%s" % (e, installer_path))
+            warn_box = QMessageBox(self.win if self.win.isVisible() else None)
+            warn_box.setIcon(QMessageBox.Warning)
+            warn_box.setWindowTitle("无法开始安装")
+            warn_box.setText("启动安装程序失败")
+            warn_box.setInformativeText("错误信息：%s\n\n安装包已保存到：\n%s"
+                                        % (e, installer_path))
+            # 不用标准按钮：Qt 默认按钮写的是英文 OK，正式对外要统一成中文
+            warn_box.addButton("确定", QMessageBox.AcceptRole)
+            warn_box.exec_()
             return
         if silent:
             Toast.show_toast("正在安装新版本", "软件会自动关闭并重新打开。",
@@ -452,7 +489,7 @@ class AppController(QObject):
         if state == "done":
             cleanup_installers()
             QTimer.singleShot(400, lambda: Toast.show_toast(
-                "更新完成", "已升级到 %s，设置和截图习惯都保留着。" % APP_VERSION,
+                "更新完成", "已升级到 %s，设置与快捷键均已保留。" % APP_VERSION,
                 kind="check", timeout=4500))
             return
         if state != "failed":
@@ -461,10 +498,10 @@ class AppController(QObject):
 
         # 还停在旧版本：安装流程没走完（被杀软拦下、被取消、目录不可写…）
         cleanup_installers(keep=installer)
-        tip = ("安装包已保存，可手动双击安装：\n%s" % installer
-               if installer else "请到发布页重新下载安装包。")
+        tip = ("安装包已保存，双击即可完成升级：\n%s" % installer
+               if installer else "请打开「检查更新」重新下载安装包。")
         QTimer.singleShot(400, lambda: Toast.show_toast(
-            "上次更新没有完成", tip, kind="warn", timeout=8000))
+            "更新未完成", tip, kind="warn", timeout=8000))
 
     # ------------------------------------------------------------ 设置
     def open_settings(self):
@@ -472,8 +509,10 @@ class AppController(QObject):
         # 录快捷键时先停掉触发，否则按下当前组合就会当场截图
         self.hotkey.set_enabled(False)
         try:
-            dlg = SettingsDialog(config, self._try_apply_hotkey, None)
+            dlg = SettingsDialog(config, self._try_apply_hotkey, None,
+                                 update_info=self._available_update)
             accepted = dlg.exec_() == QDialog.Accepted
+            wants_update = bool(getattr(dlg, "wants_update", False))
         finally:
             self.hotkey.set_enabled(True)
         if accepted:
@@ -483,6 +522,9 @@ class AppController(QObject):
         else:
             # 对话框里可能已试注册新键，取消时回滚
             self.hotkey.register(original)
+        if wants_update:
+            # 设置已经关掉了，等这一帧结束后再开更新窗口
+            QTimer.singleShot(0, self.show_update)
 
     def _try_apply_hotkey(self, sequence: str):
         return self.hotkey.register(normalize_sequence(sequence))

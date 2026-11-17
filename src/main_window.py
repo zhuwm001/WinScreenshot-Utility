@@ -40,6 +40,7 @@ def _force_foreground(hwnd: int):
 class MainWindow(QWidget):
     capture_requested = pyqtSignal()
     settings_requested = pyqtSignal()
+    update_requested = pyqtSignal()
     hide_requested = pyqtSignal()
     quit_requested = pyqtSignal()
     close_requested = pyqtSignal()
@@ -58,6 +59,7 @@ class MainWindow(QWidget):
 
         self._dragging = False
         self._drag_offset = QPoint()
+        self._update_info = None
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(self.MARGIN, self.MARGIN, self.MARGIN, self.MARGIN)
@@ -114,19 +116,28 @@ class MainWindow(QWidget):
         head.addLayout(txt_box)
         head.addStretch(1)
 
+        # 右上角四个按钮：更新提示（仅有新版本时出现）· 设置 · 隐藏 · 关闭
+        winbtns = QHBoxLayout()
+        winbtns.setSpacing(5)
+
+        self.btn_update = self._title_button("update", "发现新版本", 18)
+        self.btn_update.clicked.connect(self.update_requested.emit)
+        self.btn_update.hide()
+        winbtns.addWidget(self.btn_update)
+
         self.btn_settings = self._title_button("settings", "设置", 17, 1.8)
         self.btn_settings.clicked.connect(self.settings_requested.emit)
-        head.addWidget(self.btn_settings)
-
-        head.addSpacing(4)
+        winbtns.addWidget(self.btn_settings)
 
         self.btn_min = self._title_button("minimize", "隐藏到桌面右下角")
         self.btn_min.clicked.connect(self.hide_requested.emit)
-        head.addWidget(self.btn_min)
+        winbtns.addWidget(self.btn_min)
 
         self.btn_close = self._title_button("close", "关闭")
         self.btn_close.clicked.connect(self.close)
-        head.addWidget(self.btn_close)
+        winbtns.addWidget(self.btn_close)
+
+        head.addLayout(winbtns)
 
         lay.addLayout(head)
         lay.addSpacing(20)
@@ -201,6 +212,18 @@ class MainWindow(QWidget):
     # ------------------------------------------------------------------ 对外
     def set_hotkey_text(self, text: str):
         self.lbl_hotkey.setText("截图快捷键  %s" % (text or "未设置"))
+
+    def set_update_available(self, info):
+        """有新版本时在标题栏亮出绿箭头；传 None 收起。"""
+        self._update_info = info
+        if info is None:
+            self.btn_update.setToolTip("发现新版本")
+            self.btn_update.hide()
+            return
+        ver = (getattr(info, "version", "") or "").strip()
+        self.btn_update.setToolTip("发现新版本 %s，点击查看" % ver if ver
+                                  else "发现新版本，点击查看")
+        self.btn_update.show()
 
     def center_on_screen(self):
         screen = QApplication.primaryScreen()

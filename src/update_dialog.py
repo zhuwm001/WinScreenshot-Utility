@@ -118,7 +118,7 @@ class UpdateDialog(QDialog):
         # ---------------- 按钮 ----------------
         btns = QHBoxLayout()
         btns.setSpacing(10)
-        self.btn_page = QPushButton("查看发布页", self)
+        self.btn_page = QPushButton("打开发布页", self)
         self.btn_page.clicked.connect(self._open_page)
         btns.addWidget(self.btn_page)
         btns.addStretch(1)
@@ -188,10 +188,9 @@ class UpdateDialog(QDialog):
 
         text = (info.notes_text if info is not None else "") or "这个版本没有填写更新说明。"
         if info is not None and getattr(info, "signed", False):
-            text = ("更新清单已通过签名校验（Ed25519），安装包下载后还会核对 sha256，"
-                    "对不上不会安装。\n\n" + text)
+            text = "此版本已通过作者签名校验，可放心下载安装。\n\n" + text
         if not info or not info.has_installer:
-            text += "\n\n⚠ 这个版本没有附带安装包，只能到发布页手动下载。"
+            text += "\n\n这个版本没有提供安装包，点「打开发布页」手动下载。"
             self.btn_go.setText("打开发布页")
         else:
             self.btn_go.setText("立即更新")
@@ -200,10 +199,9 @@ class UpdateDialog(QDialog):
     def _fill_latest(self):
         self.lbl_title.setText("已是最新版本")
         self.lbl_sub.setText("当前版本 %s" % APP_VERSION)
-        self.box.setPlainText("没有发现更新的版本。\n\n"
-                              "如果刚发布过新版本，GitHub 可能有几分钟缓存，稍后再检查一次。")
-        self.box.setFixedHeight(110)
-        self.btn_go.setText("好")
+        self.box.setPlainText("当前已是最新版本，无需更新。")
+        self.box.setFixedHeight(64)
+        self.btn_go.setText("确定")
         self.btn_go.clicked.disconnect()
         self.btn_go.clicked.connect(self.accept)
         self.btn_close.hide()
@@ -212,7 +210,7 @@ class UpdateDialog(QDialog):
         self.lbl_title.setText("检查更新失败")
         self.lbl_sub.setText("当前版本 %s" % APP_VERSION)
         self.box.setPlainText((self._error_text or "") +
-                              "\n\n可以点「查看发布页」手动看看有没有新版本。")
+                              "\n\n可以点「打开发布页」手动确认是否有新版本。")
         self.box.setFixedHeight(110)
         self.btn_go.setText("重试")
         self.btn_go.clicked.disconnect()

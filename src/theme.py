@@ -168,6 +168,14 @@ def dialog_qss():
         border-radius: 8px;
         padding: 8px 12px;
     }}
+    QToolButton#updateBtn {{
+        border: none;
+        border-radius: 6px;
+        background: transparent;
+    }}
+    QToolButton#updateBtn:hover {{
+        background: #E9F9EF;
+    }}
     QLineEdit#hotkey[recording="true"] {{
         border: 1px solid {PRIMARY};
         background: #F2F6FF;

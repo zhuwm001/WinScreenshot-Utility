@@ -70,7 +70,9 @@ def main_():
 
     print("\n== 设置页「上次检查」文案 ==")
     txt = SettingsDialog._last_check_text(FakeCfg(0))
-    check("没有记录", "还没有记录" in txt, txt)
+    check("没有记录", "暂无记录" in txt, txt)
+    check("不把检查频率塞进设置页",
+          "6 小时" not in SettingsDialog._last_check_text(FakeCfg(int(now))))
 
     txt = SettingsDialog._last_check_text(FakeCfg(int(now)))
     check("今天", "今天" in txt, txt)

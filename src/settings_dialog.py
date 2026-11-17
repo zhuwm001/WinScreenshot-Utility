@@ -2,13 +2,14 @@
 """设置对话框：截图行为、关闭行为、开机启动、全局快捷键。"""
 import datetime
 
-from PyQt5.QtCore import Qt, pyqtSignal
+from PyQt5.QtCore import QSize, Qt, pyqtSignal
 from PyQt5.QtGui import QIcon
 from PyQt5.QtWidgets import (
     QCheckBox, QDialog, QFrame, QHBoxLayout, QLabel, QLineEdit, QPushButton,
-    QRadioButton, QVBoxLayout,
+    QRadioButton, QToolButton, QVBoxLayout,
 )
 
+import icons
 import theme
 from app_config import APP_NAME, APP_VERSION, DEFAULTS
 import autostart
@@ -171,10 +172,13 @@ class HotkeyEdit(QLineEdit):
 
 
 class SettingsDialog(QDialog):
-    def __init__(self, cfg, try_apply_hotkey, parent=None):
+    def __init__(self, cfg, try_apply_hotkey, parent=None, update_info=None):
         super().__init__(parent)
         self.cfg = cfg
         self._try_apply_hotkey = try_apply_hotkey
+        self._update_info = update_info
+        # 点了「发现新版本」箭头：关掉设置、交给主程序去开更新窗口
+        self.wants_update = False
 
         self.setWindowTitle("设置 - %s" % APP_NAME)
         self.setWindowIcon(QIcon("assets/app.ico"))
@@ -240,10 +244,24 @@ class SettingsDialog(QDialog):
         # ---------------- 版本与更新 ----------------
         body = self._card("版本与更新", root)
         row = QHBoxLayout()
-        row.setSpacing(10)
+        row.setSpacing(6)
         self.lbl_version = QLabel("当前版本 %s" % APP_VERSION)
         self.lbl_version.setObjectName("versionText")
         row.addWidget(self.lbl_version)
+
+        # 有新版本时，版本号后面亮出绿箭头
+        self.btn_update = QToolButton(self)
+        self.btn_update.setObjectName("updateBtn")
+        self.btn_update.setIcon(QIcon(icons.render("update", 20)))
+        self.btn_update.setIconSize(QSize(18, 18))
+        self.btn_update.setFixedSize(24, 24)
+        self.btn_update.setCursor(Qt.PointingHandCursor)
+        self.btn_update.setFocusPolicy(Qt.NoFocus)
+        self.btn_update.setToolTip("发现新版本，点击查看")
+        self.btn_update.clicked.connect(self._open_update)
+        self.btn_update.hide()
+        row.addWidget(self.btn_update)
+
         row.addStretch(1)
         self.chk_update = QCheckBox("启动时自动检查更新")
         self.chk_update.setChecked(bool(cfg.get("check_update")))
@@ -253,6 +271,9 @@ class SettingsDialog(QDialog):
                                  "手动检查：右键托盘图标 →「检查更新…」。"))
         # 让「到底有没有在查」看得见：怀疑没提示时先看这一行
         body.addWidget(self._hint(self._last_check_text(cfg)))
+
+        if update_info is not None:
+            self._show_update_badge(update_info)
 
         root.addStretch(1)
 
@@ -288,6 +309,18 @@ class SettingsDialog(QDialog):
             self.lbl_alt.hide()
             self.lbl_alt.setText("")
 
+    # ---------- 新版本提示 ----------
+    def _show_update_badge(self, info):
+        ver = (getattr(info, "version", "") or "").strip()
+        self.btn_update.setToolTip("发现新版本 %s，点击查看" % ver if ver
+                                  else "发现新版本，点击查看")
+        self.btn_update.show()
+
+    def _open_update(self):
+        """关掉设置，交给主程序打开更新窗口（设置里的改动不保存）。"""
+        self.wants_update = True
+        self.reject()
+
     # ---------- 组件 ----------
     def _card(self, title: str, parent_layout) -> QVBoxLayout:
         card = QFrame(self)
@@ -316,7 +349,7 @@ class SettingsDialog(QDialog):
         except (TypeError, ValueError):
             ts = 0
         if ts <= 0:
-            return "上次检查：还没有记录（重启软件会立刻查一次）"
+            return "上次检查：暂无记录"
         dt = datetime.datetime.fromtimestamp(ts)
         today = datetime.date.today()
         if dt.date() == today:
@@ -325,7 +358,7 @@ class SettingsDialog(QDialog):
             when = "昨天 %s" % dt.strftime("%H:%M")
         else:
             when = dt.strftime("%Y-%m-%d %H:%M")
-        return "上次检查：%s · 重启软件会立刻查，常驻期间每 6 小时查一次" % when
+        return "上次检查：%s" % when
 
     # ---------- 校验 ----------
     def _show_error(self, msg: str):

@@ -106,7 +106,9 @@ def main():
     print("\n== 已是最新 ==")
     dlg4 = ud.UpdateDialog(mode=ud.MODE_LATEST)
     check("标题已是最新", dlg4.lbl_title.text() == "已是最新版本")
-    check("按钮是「好」", dlg4.btn_go.text() == "好", dlg4.btn_go.text())
+    check("按钮是「确定」", dlg4.btn_go.text() == "确定", dlg4.btn_go.text())
+    check("正文不出现开发者措辞", "GitHub" not in dlg4.box.toPlainText(),
+          dlg4.box.toPlainText())
     check("隐藏稍后按钮", not dlg4.btn_close.isVisible())
     dlg4.close()
 
