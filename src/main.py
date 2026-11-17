@@ -11,7 +11,7 @@ from PyQt5.QtWidgets import QApplication, QDialog, QMenu, QMessageBox, QSystemTr
 
 import theme
 import autostart
-from app_config import APP_NAME, APP_VERSION, config
+from app_config import APP_NAME, APP_VERSION, as_bool, config
 from hotkey import HotkeyManager, normalize_sequence
 from main_window import MainWindow
 from overlay import CaptureSession
@@ -203,7 +203,7 @@ class AppController(QObject):
 
     def _sync_autostart(self):
         """校正注册表里的启动项，与设置里的开关保持一致。"""
-        on = bool(config.get("auto_start"))
+        on = as_bool(config.get("auto_start"), False)
         try:
             if on and not autostart.is_enabled():
                 # 用户可能在任务管理器里自行关掉了，尊重这个选择
@@ -434,7 +434,7 @@ class AppController(QObject):
         绕过节流、或者查完了却忘了刷新「上次检查」时间的情况。
         每次的决定都写进 update.log，事后不用靠猜。
         """
-        enabled = bool(config.get("check_update"))
+        enabled = as_bool(config.get("check_update"), True)
         if not check_allowed(trigger, config.get("update_last_check"),
                              enabled=enabled):
             if trigger != CHECK_TIMER:       # 定时器每 10 分钟问一次，别刷屏

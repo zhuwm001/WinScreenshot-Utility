@@ -13,7 +13,7 @@ from PyQt5.QtWidgets import (
 import icons
 import theme
 import update_log
-from app_config import APP_NAME, APP_VERSION, DEFAULTS
+from app_config import APP_NAME, APP_VERSION, DEFAULTS, as_bool, as_choice
 import autostart
 from hotkey import contains_alt
 
@@ -201,6 +201,8 @@ class SettingsDialog(QDialog):
         self._ready = False
         # 点了「发现新版本」箭头：关掉设置、交给主程序去开更新窗口
         self.wants_update = False
+        # 点过「恢复默认」：保存时连界面上看不到的设置项（笔色、字号、粗体）一起回默认
+        self._reset_extras = False
 
         self.setWindowTitle("设置 - %s" % APP_NAME)
         self.setWindowIcon(QIcon("assets/app.ico"))
@@ -215,7 +217,7 @@ class SettingsDialog(QDialog):
         # ---------------- 截图行为 ----------------
         body = self._card("截图", root)
         self.chk_hide = QCheckBox("截图时隐藏「%s」窗口" % APP_NAME)
-        self.chk_hide.setChecked(bool(cfg.get("hide_self")))
+        self.chk_hide.setChecked(as_bool(cfg.get("hide_self"), DEFAULTS["hide_self"]))
         body.addWidget(self.chk_hide)
         body.addWidget(self._hint("截图瞬间自动隐藏本软件窗口，截图里不会出现软件界面。"))
 
@@ -223,7 +225,8 @@ class SettingsDialog(QDialog):
         body = self._card("点击窗口关闭按钮时", root)
         self.rb_tray = QRadioButton("隐藏到托盘")
         self.rb_exit = QRadioButton("直接退出程序")
-        if cfg.get("close_action") == "exit":
+        if as_choice(cfg.get("close_action"), ("tray", "exit"),
+                     DEFAULTS["close_action"]) == "exit":
             self.rb_exit.setChecked(True)
         else:
             self.rb_tray.setChecked(True)
@@ -234,7 +237,7 @@ class SettingsDialog(QDialog):
         # ---------------- 开机启动 ----------------
         body = self._card("开机启动", root)
         self.chk_auto = QCheckBox("开机时自动启动「%s」" % APP_NAME)
-        self.chk_auto.setChecked(bool(cfg.get("auto_start")))
+        self.chk_auto.setChecked(as_bool(cfg.get("auto_start"), DEFAULTS["auto_start"]))
         body.addWidget(self.chk_auto)
         body.addWidget(self._hint("登录 Windows 后自动在桌面右下角托盘区运行，不弹出主界面，"
                                  "按快捷键即可截图。"))
@@ -313,14 +316,18 @@ class SettingsDialog(QDialog):
         self.btn_log.setToolTip("打开更新检查日志")
         self.btn_log.clicked.connect(self._open_log)
         row.addWidget(self.btn_log)
-        row.addSpacing(12)
-
-        self.chk_update = QCheckBox("自动检查更新")
-        self.chk_update.setChecked(bool(cfg.get("check_update")))
-        # 默认开启；锁住最小宽度，别让布局把它压扁或挤出可视区
-        self.chk_update.setMinimumWidth(self.chk_update.sizeHint().width() + 4)
-        row.addWidget(self.chk_update)
         body.addLayout(row)
+
+        # 「自动检查更新」单独一行：挤在上面那一行时，窗口略窄就会被压扁甚至
+        # 挤出可视区，看起来就像「没勾上」。单独一行之后任何宽度都完整可见。
+        self.chk_update = QCheckBox("自动检查更新")
+        self.chk_update.setChecked(as_bool(cfg.get("check_update"),
+                                          DEFAULTS["check_update"]))
+        chk_row = QHBoxLayout()
+        chk_row.setContentsMargins(0, 4, 0, 0)
+        chk_row.addWidget(self.chk_update)
+        chk_row.addStretch(1)
+        body.addLayout(chk_row)
         body.addWidget(self._hint("软件每次启动时检查一次，常驻托盘期间每 12 小时检查一次。"
                                  "检测到新版本后会在界面中提示，点击「立即更新」可自动下载、"
                                  "静默安装并重新启动。检查失败时可点击「查看日志」查看原因。"))
@@ -546,7 +553,13 @@ class SettingsDialog(QDialog):
         }
 
     def _restore_defaults(self):
+        """所有设置项回到出厂值（保存后才生效）。
+
+        界面上能改的 5 项当场回填；界面上没有的（笔色、字号、粗体）先记下来，
+        点保存时一起写回默认，保证「恢复默认」确实是全部恢复，而不只是看得见的那几项。
+        """
         self._clear_error()
+        self._reset_extras = True
         self.chk_hide.setChecked(bool(DEFAULTS["hide_self"]))
         if DEFAULTS["close_action"] == "exit":
             self.rb_exit.setChecked(True)
@@ -584,6 +597,10 @@ class SettingsDialog(QDialog):
             self.lbl_auto_error.show()
             return
 
+        if self._reset_extras:
+            # 先把界面上看不到的设置项回默认，再写入当前表单的值（用户若在
+            # 「恢复默认」之后又改了某一项，以他最后的选择为准）
+            self.cfg.reset_settings()
         for k, v in values.items():
             self.cfg.set(k, v)
         self.cfg.save()

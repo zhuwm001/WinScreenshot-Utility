@@ -2,10 +2,11 @@
 """配置读写：%APPDATA%\\我爱截图\\config.json"""
 import json
 import os
+import re
 
 APP_NAME = "我爱截图"
 APP_ID = "WoAiJieTu"
-APP_VERSION = "1.2.2"
+APP_VERSION = "1.2.3"
 
 DEFAULTS = {
     "config_schema": 2,              # 配置结构版本，用于旧配置迁移
@@ -27,6 +28,16 @@ CURRENT_SCHEMA = 2
 # 避免「配置里少了或写坏了」导致开关显示成关闭（例如自动检查更新默认是开的）。
 BOOL_KEYS = ("hide_self", "auto_start", "text_bold", "check_update")
 
+# 设置窗口里能改的项。恢复默认时就按这些键回滚。
+# 其余键（update_last_check / update_last_result）是运行状态，不属于「设置」。
+SETTING_KEYS = ("hotkey", "hide_self", "close_action", "auto_start",
+                "check_update", "pen_color", "text_size", "text_bold")
+
+# 纯运行状态：恢复默认不该把它们清掉（否则「上次检查」会变回暂无记录）
+STATE_KEYS = ("update_last_check", "update_last_result")
+
+COLOR_RE = re.compile(r"^#[0-9A-Fa-f]{6}$")
+
 
 def as_bool(value, fallback=False) -> bool:
     """把配置里的值规整成布尔；认不出来就用默认值。"""
@@ -41,6 +52,36 @@ def as_bool(value, fallback=False) -> bool:
         if low in ("0", "false", "no", "off"):
             return False
     return bool(fallback)
+
+
+def as_choice(value, choices, fallback):
+    """枚举型配置：不在候选里就用默认值（大小写、空白都容忍）。"""
+    if isinstance(value, str):
+        low = value.strip().lower()
+        for c in choices:
+            if low == str(c).lower():
+                return c
+    return fallback
+
+
+def as_int(value, fallback: int, low: int = None, high: int = None) -> int:
+    """整数型配置：转不动或越界就用默认值。"""
+    try:
+        num = int(value)
+    except (TypeError, ValueError):
+        return int(fallback)
+    if low is not None and num < low:
+        return int(fallback)
+    if high is not None and num > high:
+        return int(fallback)
+    return num
+
+
+def as_color(value, fallback: str) -> str:
+    """#RRGGBB 形式的颜色；写坏了回默认，避免画出透明或黑块。"""
+    if isinstance(value, str) and COLOR_RE.match(value.strip()):
+        return value.strip().upper()
+    return fallback
 
 
 def config_dir() -> str:
@@ -63,6 +104,7 @@ class Config:
 
     # ---------- 基础 ----------
     def load(self):
+        existed = os.path.exists(config_path())
         try:
             # utf-8-sig：别的编辑器/脚本存盘时可能带 BOM，容忍它
             with open(config_path(), "r", encoding="utf-8-sig") as f:
@@ -81,9 +123,27 @@ class Config:
                         self._data[k] = v
         except Exception:
             pass
-        # 配置缺失或写坏时回到默认值：自动检查更新默认开启，不因为文件残缺就变关闭
         for key in BOOL_KEYS:
             self._data[key] = as_bool(self._data.get(key), DEFAULTS[key])
+        # 其余设置项同样规整：配置被手工改坏时也回默认，而不是带着错值跑
+        self._data["close_action"] = as_choice(
+            self._data.get("close_action"), ("tray", "exit"), DEFAULTS["close_action"])
+        self._data["text_size"] = as_int(
+            self._data.get("text_size"), DEFAULTS["text_size"], 12, 96)
+        self._data["pen_color"] = as_color(
+            self._data.get("pen_color"), DEFAULTS["pen_color"])
+        self._data["config_schema"] = CURRENT_SCHEMA
+        hotkey = str(self._data.get("hotkey") or "").strip()
+        self._data["hotkey"] = hotkey or DEFAULTS["hotkey"]
+        if not existed:
+            # 首次运行就把默认配置落盘：以后再读到的就是明确的值，
+            # 不会出现「文件不存在」和「值写坏了」两种状态混在一起。
+            self.save()
+
+    def reset_settings(self):
+        """把所有用户设置项恢复成默认值（不含运行状态）。"""
+        for key in SETTING_KEYS:
+            self._data[key] = DEFAULTS[key]
 
     def save(self):
         try:
