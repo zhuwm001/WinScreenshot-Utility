@@ -5,7 +5,7 @@ import os
 
 APP_NAME = "我爱截图"
 APP_ID = "WoAiJieTu"
-APP_VERSION = "1.2.1"
+APP_VERSION = "1.2.2"
 
 DEFAULTS = {
     "config_schema": 2,              # 配置结构版本，用于旧配置迁移
@@ -22,6 +22,25 @@ DEFAULTS = {
 }
 
 CURRENT_SCHEMA = 2
+
+# 布尔型配置项：JSON 里被写成 null / "false" / 0 时统一按类型校正，
+# 避免「配置里少了或写坏了」导致开关显示成关闭（例如自动检查更新默认是开的）。
+BOOL_KEYS = ("hide_self", "auto_start", "text_bold", "check_update")
+
+
+def as_bool(value, fallback=False) -> bool:
+    """把配置里的值规整成布尔；认不出来就用默认值。"""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, str):
+        low = value.strip().lower()
+        if low in ("1", "true", "yes", "on"):
+            return True
+        if low in ("0", "false", "no", "off"):
+            return False
+    return bool(fallback)
 
 
 def config_dir() -> str:
@@ -62,6 +81,9 @@ class Config:
                         self._data[k] = v
         except Exception:
             pass
+        # 配置缺失或写坏时回到默认值：自动检查更新默认开启，不因为文件残缺就变关闭
+        for key in BOOL_KEYS:
+            self._data[key] = as_bool(self._data.get(key), DEFAULTS[key])
 
     def save(self):
         try:

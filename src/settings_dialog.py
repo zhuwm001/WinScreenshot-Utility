@@ -317,6 +317,8 @@ class SettingsDialog(QDialog):
 
         self.chk_update = QCheckBox("自动检查更新")
         self.chk_update.setChecked(bool(cfg.get("check_update")))
+        # 默认开启；锁住最小宽度，别让布局把它压扁或挤出可视区
+        self.chk_update.setMinimumWidth(self.chk_update.sizeHint().width() + 4)
         row.addWidget(self.chk_update)
         body.addLayout(row)
         body.addWidget(self._hint("软件每次启动时检查一次，常驻托盘期间每 12 小时检查一次。"
@@ -349,6 +351,10 @@ class SettingsDialog(QDialog):
         root.addLayout(btns)
 
         self._on_hotkey_changed(self.hotkey_edit.value())
+        # 版本号那一行元素多（版本号 + 绿箭头 + 立即检查 + 查看日志 + 复选框）：
+        # 窗口窄到一定程度会把复选框挤出可视区，看起来就像「没勾选」。
+        # 这里按内容算一次自然宽度当最小宽度，字号变大时也跟着变。
+        self.setMinimumWidth(max(500, self.sizeHint().width()))
         self._ready = True
 
     # ---------- 快捷键相关提示 ----------
