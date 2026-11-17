@@ -296,6 +296,7 @@ class AppController(QObject):
             self.hide_to_tray()
 
     def quit_app(self):
+        ulog("退出程序")
         try:
             self.hotkey.close()
         except Exception:
@@ -303,6 +304,14 @@ class AppController(QObject):
         self.tray.hide()
         self.win.hide()
         QApplication.quit()
+        # 兜底：托盘程序「退出」必须真的退出。万一还有隐藏窗口或没退干净的事件
+        # 循环把 quit() 吞了，进程就会赖在后台占着热键和单实例 —— 用户再双击
+        # 图标只会唤醒它、不会走启动检查，看上去就像「重开了却不查更新」。
+        QTimer.singleShot(3000, self._force_exit)
+
+    def _force_exit(self):
+        ulog("退出兜底：3 秒内没有正常结束，强制退出")
+        os._exit(0)
 
     # ------------------------------------------------------------ 截图
     def start_capture(self, from_hotkey: bool = False):

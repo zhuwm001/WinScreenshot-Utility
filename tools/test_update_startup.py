@@ -135,6 +135,15 @@ def main_():
     check("关闭后启动不查", ctrl2._check_trigger == app_main.CHECK_TIMER,
           str(ctrl2._check_trigger))
 
+    print("\n== 退出必须真的退出 ==")
+    # 进程赖在后台是最坏的情况：它占着热键和单实例，用户再双击图标只会唤醒它，
+    # 于是「重开一次」永远不会走启动检查。
+    source = open(app_main.__file__, encoding="utf-8").read()
+    body = source[source.index("def quit_app"):source.index("def _force_exit")]
+    check("退出调用了 QApplication.quit", "QApplication.quit()" in body)
+    check("退出还有强制兜底", "QTimer.singleShot(3000" in body and "_force_exit" in body)
+    check("兜底用的是硬退出", "os._exit(0)" in source)
+
     print("\n通过 %d 项，失败 %d 项" % (len(PASS), len(FAIL)))
     if FAIL:
         for name in FAIL:
