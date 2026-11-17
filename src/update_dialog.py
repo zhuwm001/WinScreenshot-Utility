@@ -186,11 +186,11 @@ class UpdateDialog(QDialog):
                 bits.append("签名已校验")
         self.lbl_sub.setText(" · ".join(bits))
 
-        text = (info.notes_text if info is not None else "") or "这个版本没有填写更新说明。"
+        text = (info.notes_text if info is not None else "") or "该版本未提供更新说明。"
         if info is not None and getattr(info, "signed", False):
-            text = "此版本已通过作者签名校验，可放心下载安装。\n\n" + text
+            text = "此版本已通过作者签名校验。\n\n" + text
         if not info or not info.has_installer:
-            text += "\n\n这个版本没有提供安装包，点「打开发布页」手动下载。"
+            text += "\n\n该版本未提供安装包，请点击「打开发布页」手动下载。"
             self.btn_go.setText("打开发布页")
         else:
             self.btn_go.setText("立即更新")

@@ -192,7 +192,7 @@ check("隐藏到托盘每次都提示（没有只弹一次的门闩）", "_tray_
 check("隐藏到托盘确实调用了提示", "Toast.show_toast" in body)
 
 print("\n== 主程序接线 ==")
-check("托盘菜单在有新版本时也写明版本", "点这里更新" in src)
+check("托盘菜单在有新版本时也写明版本", "点击更新" in src)
 check("设置页「立即检查」走同一个入口", "self._on_settings_check" in src)
 check("设置页拿到只探测的接口", "probe_hotkey=self._probe_hotkey" in src)
 check("设置页会被主程序记住（好回填状态）", "self._settings_dlg = dlg" in src)

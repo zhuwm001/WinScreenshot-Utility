@@ -60,7 +60,7 @@ def hotkey_state_text(ok: bool, sequence: str, message: str = "") -> str:
     seq = (sequence or "").strip()
     if ok:
         return "「%s」可以使用。" % seq if seq else ""
-    return message or ("「%s」不可用，请换一个组合。" % seq if seq else "")
+    return message or ("「%s」不可用，请更换其他组合。" % seq if seq else "")
 
 
 def qt_key_to_name(key: int) -> str:
@@ -229,7 +229,7 @@ class SettingsDialog(QDialog):
             self.rb_tray.setChecked(True)
         body.addWidget(self.rb_tray)
         body.addWidget(self.rb_exit)
-        body.addWidget(self._hint("隐藏到托盘：点「×」后程序继续在桌面右下角托盘区运行，双击图标可再打开。"))
+        body.addWidget(self._hint("隐藏到托盘：关闭窗口后程序继续在桌面右下角托盘区运行，双击托盘图标可重新打开窗口。"))
 
         # ---------------- 开机启动 ----------------
         body = self._card("开机启动", root)
@@ -254,9 +254,9 @@ class SettingsDialog(QDialog):
         self.lbl_alt.setWordWrap(True)
         self.lbl_alt.hide()
         body.addWidget(self.lbl_alt)
-        body.addWidget(self._hint("点输入框后直接按组合键（需含 Ctrl/Shift/Win）。"
-                                 "别用带 Alt 的：Alt 一按，别人展开着的菜单就会收起，"
-                                 "截不到内容，改用 Ctrl+Shift+字母。"))
+        body.addWidget(self._hint("在输入框内直接按组合键（须含 Ctrl、Shift 或 Win）。"
+                                 "不建议含 Alt：按下 Alt 会收起已展开的菜单，"
+                                 "导致菜单内容无法截取。推荐 Ctrl+Shift+字母。"))
         # 录完组合键马上给结果：能不能用、被谁占用，不用等点保存才知道
         self.lbl_hotkey_state = QLabel("")
         self.lbl_hotkey_state.setStyleSheet("color: %s; font-size: 12px;" % theme.TEXT_SUB)
@@ -319,9 +319,9 @@ class SettingsDialog(QDialog):
         self.chk_update.setChecked(bool(cfg.get("check_update")))
         row.addWidget(self.chk_update)
         body.addLayout(row)
-        body.addWidget(self._hint("每次启动软件检查一次，常驻托盘时每 12 小时检查一次；"
-                                 "发现新版本会在软件里提示，点「立即更新」自动下载、"
-                                 "静默安装并重开。查不到时点「查看日志」看具体原因。"))
+        body.addWidget(self._hint("软件每次启动时检查一次，常驻托盘期间每 12 小时检查一次。"
+                                 "检测到新版本后会在界面中提示，点击「立即更新」可自动下载、"
+                                 "静默安装并重新启动。检查失败时可点击「查看日志」查看原因。"))
         # 让「到底有没有在查、查出什么」都看得见 —— 怀疑没提示时先看这一行
         self.lbl_last = self._hint(self._last_check_text(cfg))
         body.addWidget(self.lbl_last)
@@ -353,12 +353,13 @@ class SettingsDialog(QDialog):
 
     # ---------- 快捷键相关提示 ----------
     def _on_hotkey_changed(self, value: str):
-        """含 Alt 的组合键截不到多级菜单，当场在界面上说清楚（不是一闪而过的提示）。"""
+        """含 Alt 的组合键无法截取展开的多级菜单，当场在界面上说明（不是一闪而过的提示）。"""
         if contains_alt(value):
             key = value.split("+")[-1] or "S"
             self.lbl_alt.setText(
-                "「%s」里有 Alt：截不到展开着的多级菜单和下拉框，"
-                "建议改用 Ctrl+Shift+%s 这类不含 Alt 的组合。" % (value, key))
+                "「%s」包含 Alt：按下 Alt 会收起已展开的菜单和下拉框，"
+                "无法截取其内容。建议改用 Ctrl+Shift+%s 等不含 Alt 的组合。"
+                % (value, key))
             self.lbl_alt.show()
         else:
             self.lbl_alt.hide()

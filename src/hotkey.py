@@ -452,7 +452,7 @@ class HotkeyManager(QObject):
             return True, ""
         name = normalize_sequence(sequence)
         if err and err != ERROR_HOTKEY_ALREADY_REGISTERED:
-            return False, "快捷键 %s 注册失败（错误码 %d），请换一个组合" % (name, err)
+            return False, "快捷键 %s 注册失败（错误码 %d），请更换其他组合" % (name, err)
         return False, "快捷键 %s 已被其他程序占用，请重新设置" % name
 
     def register(self, sequence: str):
@@ -475,7 +475,7 @@ class HotkeyManager(QObject):
         if not ok:
             msg = "快捷键 %s 已被其他程序占用，请重新设置" % new_seq
             if err and err != ERROR_HOTKEY_ALREADY_REGISTERED:
-                msg = "快捷键 %s 注册失败（错误码 %d），请换一个组合" % (new_seq, err)
+                msg = "快捷键 %s 注册失败（错误码 %d），请更换其他组合" % (new_seq, err)
             return False, msg
 
         if old_valid:
@@ -488,7 +488,7 @@ class HotkeyManager(QObject):
             if not user32.RegisterHotKey(None, self._HOTKEY_ID, mods | MOD_NOREPEAT, vk):
                 if old_valid and old_seq:
                     self._restore(old_seq)
-                return False, "快捷键 %s 注册失败，请换一个组合" % new_seq
+                return False, "快捷键 %s 注册失败，请更换其他组合" % new_seq
 
         self._mods, self._vk = mods, vk
         self._registered = True

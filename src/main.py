@@ -252,8 +252,8 @@ class AppController(QObject):
         act_update = menu.addAction("检查更新…")
         if self._available_update is not None:
             ver = (getattr(self._available_update, "version", "") or "").strip()
-            act_update.setText("发现新版本 %s，点这里更新…" % ver if ver
-                               else "发现新版本，点这里更新…")
+            act_update.setText("发现新版本 %s，点击更新…" % ver if ver
+                               else "发现新版本，点击更新…")
         act_update.triggered.connect(
             lambda: self.request_update_check(CHECK_MANUAL))
 
@@ -365,7 +365,7 @@ class AppController(QObject):
         self._persist_text_style()
         self.overlay = None
         self._restore_main_window()
-        Toast.show_toast("已复制到剪贴板", "可直接到其他窗口按 Ctrl+V 粘贴。",
+        Toast.show_toast("已复制到剪贴板", "可在其他窗口中按 Ctrl+V 粘贴。",
                          kind="check", timeout=3000)
 
     def _on_capture_cancelled(self):
@@ -625,8 +625,8 @@ class AppController(QObject):
             Toast.show_toast("正在安装新版本", "软件会自动关闭并重新打开。",
                              kind="check", timeout=2500)
         else:
-            Toast.show_toast("请在安装向导里点下一步",
-                             "当前目录需要管理员权限，无法全自动安装。",
+            Toast.show_toast("请在安装向导中完成安装",
+                             "当前目录需要管理员权限，无法自动安装。",
                              kind="warn", timeout=6000)
         # 留一点时间让界面刷完再退出；安装程序自己会等 3 秒
         QTimer.singleShot(300, self.quit_app)

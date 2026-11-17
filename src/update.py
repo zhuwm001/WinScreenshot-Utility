@@ -372,34 +372,34 @@ def _request(url: str) -> QNetworkRequest:
 
 def _http_hint(status: int) -> str:
     if status == 404:
-        return ("没找到更新清单（HTTP 404）。可能是还没发布带 latest.json 的版本，"
-                "或者仓库又改回 Private 了。")
+        return ("未找到更新清单（HTTP 404）。可能尚未发布包含 latest.json 的版本，"
+                "或仓库已改为私有。")
     if status in (403, 429):
-        return "GitHub 拒绝访问（HTTP %d），可能是访问太频繁，过一会儿再试。" % status
+        return "GitHub 拒绝访问（HTTP %d），请求可能过于频繁，请稍后重试。" % status
     if status >= 500:
-        return "GitHub 服务器暂时出问题（HTTP %d），过一会儿再试。" % status
+        return "GitHub 服务器暂时不可用（HTTP %d），请稍后重试。" % status
     return "GitHub 返回 HTTP %d。" % status
 
 
 def _network_error(detail: str) -> str:
-    """把 Qt / urllib 的英文错误翻成人话；TLS 那条最容易让人以为是网络断了。"""
+    """把 Qt / urllib 的英文错误翻成中文；TLS 那条最容易让人误以为网络中断。"""
     detail = detail or "未知错误"
     low = detail.lower()
     if "tls initialization" in low or "ssl handshake" in low:
-        return ("无法建立加密连接（%s）。请确认系统时间正确、网络能访问 GitHub；"
-                "如果用了代理，确认代理支持 HTTPS。" % detail)
+        return ("无法建立加密连接（%s）。请确认系统时间正确、网络可访问 GitHub；"
+                "如使用代理，请确认代理支持 HTTPS。" % detail)
     if "tunnel connection failed" in low or "proxyerror" in low or "proxy" in low:
-        return ("代理服务器没能连上 GitHub（%s）。请检查代理软件是否在运行，"
-                "或者临时关掉代理再试。" % detail)
+        return ("代理服务器无法连接 GitHub（%s）。请确认代理软件正常运行，"
+                "或暂时关闭代理后重试。" % detail)
     m = re.search(r"http error (\d{3})", low)
     if m:
         return _http_hint(int(m.group(1)))
     if "timed out" in low or "timeout" in low:
         return "连接 GitHub 超时，请检查网络或代理后重试。"
     if "host not found" in low or "unknown error" in low or "getaddrinfo" in low:
-        return "解析不到 GitHub 域名（DNS 失败），请检查网络或代理设置。"
+        return "无法解析 GitHub 域名（DNS 失败），请检查网络或代理设置。"
     if "connection refused" in low or "connection closed" in low:
-        return "连接被中断（%s），可能是代理或防火墙拦截。" % detail
+        return "连接被中断（%s），可能被代理或防火墙拦截。" % detail
     return "网络连接失败：%s" % detail
 
 
@@ -573,7 +573,7 @@ class InstallerDownloader(QObject):
     # ---------- 开始 ----------
     def start(self, info: ReleaseInfo, dest_dir: str = ""):
         if not info or not info.asset_url:
-            self.failed.emit("这个版本没有可下载的安装包。")
+            self.failed.emit("该版本未提供可下载的安装包。")
             return
         if not url_allowed(info.asset_url):
             self.failed.emit("安装包地址不在允许的域名下，已拒绝下载：%s" % info.asset_url)
