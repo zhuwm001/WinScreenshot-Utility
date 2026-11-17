@@ -2,7 +2,7 @@
 """设置对话框：截图行为、关闭行为、开机启动、全局快捷键。"""
 import datetime
 
-from PyQt5.QtCore import QSize, Qt, pyqtSignal
+from PyQt5.QtCore import QSize, Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QIcon
 from PyQt5.QtWidgets import (
     QCheckBox, QDialog, QFrame, QHBoxLayout, QLabel, QLineEdit, QPushButton,
@@ -47,6 +47,18 @@ _MODIFIER_KEYS = {
     Qt.Key_Control, Qt.Key_Shift, Qt.Key_Alt, Qt.Key_Meta,
     Qt.Key_AltGr, Qt.Key_CapsLock, Qt.Key_NumLock, Qt.Key_ScrollLock,
 }
+
+# 录完组合键后多久去探测「有没有被别的程序占用」。
+# 用户要求"设置完 2 秒内给结果"，这里 0.3 秒就查，留足余量。
+HOTKEY_PROBE_DELAY_MS = 300
+
+
+def hotkey_state_text(ok: bool, sequence: str, message: str = "") -> str:
+    """录完快捷键后那一行状态文案（纯函数，方便测试）。"""
+    seq = (sequence or "").strip()
+    if ok:
+        return "「%s」可以使用。" % seq if seq else ""
+    return message or ("「%s」不可用，请换一个组合。" % seq if seq else "")
 
 
 def qt_key_to_name(key: int) -> str:
@@ -172,11 +184,19 @@ class HotkeyEdit(QLineEdit):
 
 
 class SettingsDialog(QDialog):
-    def __init__(self, cfg, try_apply_hotkey, parent=None, update_info=None):
+    check_requested = pyqtSignal()
+
+    def __init__(self, cfg, try_apply_hotkey, parent=None, update_info=None,
+                 probe_hotkey=None):
         super().__init__(parent)
         self.cfg = cfg
         self._try_apply_hotkey = try_apply_hotkey
+        # 只探测不改状态的接口：录完组合键立刻用来判断有没有被别的程序占用
+        self._probe_hotkey = probe_hotkey
         self._update_info = update_info
+        self._checking = False
+        # 构造过程中会调一次 _on_hotkey_changed，那时不该去探测（避免一开设置就弹状态）
+        self._ready = False
         # 点了「发现新版本」箭头：关掉设置、交给主程序去开更新窗口
         self.wants_update = False
 
@@ -235,11 +255,23 @@ class SettingsDialog(QDialog):
         body.addWidget(self._hint("点输入框后直接按组合键（需含 Ctrl/Shift/Win）。"
                                  "别用带 Alt 的：Alt 一按，别人展开着的菜单就会收起，"
                                  "截不到内容，改用 Ctrl+Shift+字母。"))
+        # 录完组合键马上给结果：能不能用、被谁占用，不用等点保存才知道
+        self.lbl_hotkey_state = QLabel("")
+        self.lbl_hotkey_state.setStyleSheet("color: %s; font-size: 12px;" % theme.TEXT_SUB)
+        self.lbl_hotkey_state.setWordWrap(True)
+        self.lbl_hotkey_state.hide()
+        body.addWidget(self.lbl_hotkey_state)
         self.lbl_error = QLabel("")
         self.lbl_error.setStyleSheet("color: %s; font-size: 12px;" % theme.DANGER)
         self.lbl_error.setWordWrap(True)
         self.lbl_error.hide()
         body.addWidget(self.lbl_error)
+
+        # 探测用定时器：录键时手一停就查，节流到 0.3 秒，不会每敲一下都去问系统
+        self._probe_timer = QTimer(self)
+        self._probe_timer.setSingleShot(True)
+        self._probe_timer.setInterval(HOTKEY_PROBE_DELAY_MS)
+        self._probe_timer.timeout.connect(self._probe_now)
 
         # ---------------- 版本与更新 ----------------
         body = self._card("版本与更新", root)
@@ -253,7 +285,7 @@ class SettingsDialog(QDialog):
         self.btn_update = QToolButton(self)
         self.btn_update.setObjectName("updateBtn")
         self.btn_update.setIcon(QIcon(icons.render("update", 20)))
-        self.btn_update.setIconSize(QSize(18, 18))
+        self.btn_update.setIconSize(QSize(20, 20))
         self.btn_update.setFixedSize(24, 24)
         self.btn_update.setCursor(Qt.PointingHandCursor)
         self.btn_update.setFocusPolicy(Qt.NoFocus)
@@ -263,14 +295,24 @@ class SettingsDialog(QDialog):
         row.addWidget(self.btn_update)
 
         row.addStretch(1)
-        self.chk_update = QCheckBox("启动时自动检查更新")
+        self.btn_check = QPushButton("立即检查", self)
+        self.btn_check.setObjectName("linkBtn")
+        self.btn_check.setCursor(Qt.PointingHandCursor)
+        self.btn_check.setFocusPolicy(Qt.NoFocus)
+        self.btn_check.clicked.connect(self._request_check)
+        row.addWidget(self.btn_check)
+        row.addSpacing(12)
+
+        self.chk_update = QCheckBox("自动检查更新")
         self.chk_update.setChecked(bool(cfg.get("check_update")))
         row.addWidget(self.chk_update)
         body.addLayout(row)
-        body.addWidget(self._hint("发现新版本会在软件里提示；点「立即更新」自动下载、静默安装并重开。"
-                                 "手动检查：右键托盘图标 →「检查更新…」。"))
-        # 让「到底有没有在查」看得见：怀疑没提示时先看这一行
-        body.addWidget(self._hint(self._last_check_text(cfg)))
+        body.addWidget(self._hint("启动时自动检查一次，常驻托盘时每 12 小时检查一次；"
+                                 "发现新版本会在软件里提示，点「立即更新」自动下载、"
+                                 "静默安装并重开。"))
+        # 让「到底有没有在查、查出什么」都看得见 —— 怀疑没提示时先看这一行
+        self.lbl_last = self._hint(self._last_check_text(cfg))
+        body.addWidget(self.lbl_last)
 
         if update_info is not None:
             self._show_update_badge(update_info)
@@ -295,6 +337,7 @@ class SettingsDialog(QDialog):
         root.addLayout(btns)
 
         self._on_hotkey_changed(self.hotkey_edit.value())
+        self._ready = True
 
     # ---------- 快捷键相关提示 ----------
     def _on_hotkey_changed(self, value: str):
@@ -309,12 +352,92 @@ class SettingsDialog(QDialog):
             self.lbl_alt.hide()
             self.lbl_alt.setText("")
 
+        # 换了组合，上一条「已被占用」的报错就过期了，先清掉
+        self.lbl_error.hide()
+        self.lbl_error.setText("")
+
+        if not self._ready:
+            return                      # 刚打开设置时不必自己去查当前这把键
+
+        self._probe_timer.stop()
+        value = (value or "").strip()
+        if not value or self._probe_hotkey is None:
+            self._set_hotkey_state("")
+            return
+        # 先给一句「正在检查」，0.3 秒后换成真实结果 —— 用户不用等点保存
+        self._set_hotkey_state("正在检查「%s」是否可用…" % value, theme.TEXT_SUB)
+        self._probe_timer.start()
+
+    def _probe_now(self):
+        """真正去问系统：这把组合键现在能不能注册。"""
+        if self._probe_hotkey is None:
+            return
+        value = self.hotkey_edit.value().strip()
+        if not value:
+            self._set_hotkey_state("")
+            return
+        try:
+            ok, msg = self._probe_hotkey(value)
+        except Exception as e:                     # 探测本身出错不能把设置弄崩
+            self._set_hotkey_state("无法检查快捷键：%s" % e, theme.WARN)
+            return
+        self._set_hotkey_state(hotkey_state_text(ok, value, msg),
+                               theme.SUCCESS if ok else theme.DANGER)
+        self.hotkey_edit.setProperty("invalid", "false" if ok else "true")
+        repolish(self.hotkey_edit)
+
+    def _set_hotkey_state(self, text: str, color: str = ""):
+        if not text:
+            self.lbl_hotkey_state.hide()
+            self.lbl_hotkey_state.setText("")
+            return
+        self.lbl_hotkey_state.setStyleSheet(
+            "color: %s; font-size: 12px;" % (color or theme.TEXT_SUB))
+        self.lbl_hotkey_state.setText(text)
+        self.lbl_hotkey_state.show()
+
     # ---------- 新版本提示 ----------
     def _show_update_badge(self, info):
         ver = (getattr(info, "version", "") or "").strip()
         self.btn_update.setToolTip("发现新版本 %s，点击查看" % ver if ver
                                   else "发现新版本，点击查看")
         self.btn_update.show()
+
+    def set_update_info(self, info):
+        """主程序查到（或确认没有）新版本时，设置页当场跟着变，不用关掉重开。"""
+        self._update_info = info
+        if info is None:
+            self.btn_update.hide()
+            self.btn_update.setToolTip("发现新版本")
+        else:
+            self._show_update_badge(info)
+        self._refresh_last_check()
+
+    def _request_check(self):
+        """点「立即检查」：先进入检查中状态，结果由主程序回填。"""
+        if self._checking:
+            return
+        self.set_checking(True)
+        self.check_requested.emit()
+
+    def set_checking(self, on: bool):
+        self._checking = bool(on)
+        self.btn_check.setEnabled(not on)
+        self.btn_check.setText("检查中…" if on else "立即检查")
+        if on:
+            self.lbl_last.setText("正在检查更新，请稍候…")
+        else:
+            self._refresh_last_check()
+
+    def set_check_result(self, result_text: str = ""):
+        """一次检查结束：退出「检查中」并刷新「上次检查」那一行。"""
+        self._checking = False
+        self.btn_check.setEnabled(True)
+        self.btn_check.setText("立即检查")
+        self._refresh_last_check(result_text)
+
+    def _refresh_last_check(self, result_text=None):
+        self.lbl_last.setText(self._last_check_text(self.cfg, result_text))
 
     def _open_update(self):
         """关掉设置，交给主程序打开更新窗口（设置里的改动不保存）。"""
@@ -342,23 +465,28 @@ class SettingsDialog(QDialog):
         return lbl
 
     @staticmethod
-    def _last_check_text(cfg) -> str:
-        """上次检查更新的时间，让用户能确认自动检查到底跑没跑。"""
+    def _last_check_text(cfg, result_text=None) -> str:
+        """上次检查更新的时间 + 结果，让用户能确认自动检查到底跑没跑、查出了什么。"""
         try:
             ts = int(cfg.get("update_last_check") or 0)
         except (TypeError, ValueError):
             ts = 0
+        if result_text is None:
+            result_text = str(cfg.get("update_last_result") or "").strip()
         if ts <= 0:
-            return "上次检查：暂无记录"
-        dt = datetime.datetime.fromtimestamp(ts)
-        today = datetime.date.today()
-        if dt.date() == today:
-            when = "今天 %s" % dt.strftime("%H:%M")
-        elif dt.date() == today - datetime.timedelta(days=1):
-            when = "昨天 %s" % dt.strftime("%H:%M")
+            base = "上次检查：暂无记录"
         else:
-            when = dt.strftime("%Y-%m-%d %H:%M")
-        return "上次检查：%s" % when
+            dt = datetime.datetime.fromtimestamp(ts)
+            today = datetime.date.today()
+            if dt.date() == today:
+                when = "今天 %s" % dt.strftime("%H:%M")
+            elif dt.date() == today - datetime.timedelta(days=1):
+                when = "昨天 %s" % dt.strftime("%H:%M")
+            else:
+                when = dt.strftime("%Y-%m-%d %H:%M")
+            base = "上次检查：%s" % when
+        result_text = str(result_text or "").strip()
+        return "%s · %s" % (base, result_text) if result_text else base
 
     # ---------- 校验 ----------
     def _show_error(self, msg: str):
@@ -396,6 +524,7 @@ class SettingsDialog(QDialog):
         self.hotkey_edit.set_value(DEFAULTS["hotkey"])
 
     def accept(self):
+        self._probe_timer.stop()          # 别让延迟的探测把保存时的报错覆盖掉
         self._clear_error()
         values = self._read_form()
 

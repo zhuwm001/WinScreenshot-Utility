@@ -118,22 +118,22 @@ class MainWindow(QWidget):
 
         # 右上角四个按钮：更新提示（仅有新版本时出现）· 设置 · 隐藏 · 关闭
         winbtns = QHBoxLayout()
-        winbtns.setSpacing(5)
+        winbtns.setSpacing(2)
 
-        self.btn_update = self._title_button("update", "发现新版本", 18)
+        self.btn_update = self._title_button("update", "发现新版本", 20)
         self.btn_update.clicked.connect(self.update_requested.emit)
         self.btn_update.hide()
         winbtns.addWidget(self.btn_update)
 
-        self.btn_settings = self._title_button("settings", "设置", 17, 1.8)
+        self.btn_settings = self._title_button("settings", "设置", 19, 1.8)
         self.btn_settings.clicked.connect(self.settings_requested.emit)
         winbtns.addWidget(self.btn_settings)
 
-        self.btn_min = self._title_button("minimize", "隐藏到桌面右下角")
+        self.btn_min = self._title_button("minimize", "隐藏到桌面右下角", 16, 1.8)
         self.btn_min.clicked.connect(self.hide_requested.emit)
         winbtns.addWidget(self.btn_min)
 
-        self.btn_close = self._title_button("close", "关闭")
+        self.btn_close = self._title_button("close", "关闭", 16, 1.8)
         self.btn_close.clicked.connect(self.close)
         winbtns.addWidget(self.btn_close)
 
@@ -204,7 +204,7 @@ class MainWindow(QWidget):
         b.setObjectName("winbtn")
         b.setIcon(icons.render_icon(icon_kind, size, QColor(theme.TEXT_SUB), pen))
         b.setIconSize(QSize(size, size))
-        b.setFixedSize(28, 28)
+        b.setFixedSize(24, 24)
         b.setToolTip(tip)
         b.setCursor(Qt.PointingHandCursor)
         return b

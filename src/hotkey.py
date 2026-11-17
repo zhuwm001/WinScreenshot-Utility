@@ -432,14 +432,28 @@ class HotkeyManager(QObject):
 
     def can_register(self, sequence: str) -> bool:
         """试注册一次判断是否被占用（不改变当前状态）。"""
+        ok, _ = self.probe_conflict(sequence)
+        return ok
+
+    def probe_conflict(self, sequence: str):
+        """只探测、不动现有热键。返回 (可用, 给用户看的提示)。
+
+        设置里录完组合键后 0.3 秒就会调一次，所以这里**绝对不能**改
+        self._registered / self._hook 的任何状态 —— 用户还在犹豫，随时可能按取消。
+        """
         mods, vk = parse_sequence(sequence)
         if vk is None:
-            return False
+            return False, "无法识别的快捷键，请重新设置"
         # 系统约定：至少需要一个修饰键，否则会拦截普通输入
         if mods == 0:
-            return False
-        ok, _ = self._probe(mods, vk)
-        return ok
+            return False, "快捷键至少需要包含 Ctrl / Alt / Shift / Win 中的一个"
+        ok, err = self._probe(mods, vk)
+        if ok:
+            return True, ""
+        name = normalize_sequence(sequence)
+        if err and err != ERROR_HOTKEY_ALREADY_REGISTERED:
+            return False, "快捷键 %s 注册失败（错误码 %d），请换一个组合" % (name, err)
+        return False, "快捷键 %s 已被其他程序占用，请重新设置" % name
 
     def register(self, sequence: str):
         """注册热键。返回 (成功与否, 提示信息)。失败时保持原热键不变。"""

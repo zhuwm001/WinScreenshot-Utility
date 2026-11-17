@@ -23,9 +23,11 @@ from PyQt5.QtWidgets import QApplication            # noqa: E402
 
 app = QApplication(sys.argv)
 
+import icons                                        # noqa: E402
 import main as app_main                             # noqa: E402
 import main_window                                  # noqa: E402
 import settings_dialog                              # noqa: E402
+import theme                                        # noqa: E402
 import update_dialog as ud                          # noqa: E402
 from app_config import config                       # noqa: E402
 from toast import Toast                             # noqa: E402
@@ -78,10 +80,37 @@ w.set_update_available(None)
 check("没有新版本时收起绿箭头", w.btn_update.isHidden())
 w.close()
 
+# ---------------------------------------------------------------- 图标本身
+print("\n== 「发现新版本」图标 ==")
+pm = icons.render("update", 24)
+img = pm.toImage()
+check("图标尺寸正确", img.width() == 24 and img.height() == 24,
+      "%dx%d" % (img.width(), img.height()))
+
+
+def px(x, y):
+    c = img.pixelColor(x, y)
+    return (c.red(), c.green(), c.blue(), c.alpha())
+
+
+top = px(12, 1)
+check("没有底色圆（箭头正上方是透明的）", top[3] == 0, str(top))
+shaft = px(12, 9)
+check("箭头杆是绿色", shaft[3] > 0 and shaft[1] > shaft[0] and shaft[1] > shaft[2],
+      str(shaft))
+bar = px(12, 20)
+check("箭头下面那道横线还在", bar[3] > 0 and bar[1] > bar[0], str(bar))
+left = px(1, 12)
+check("左侧也是透明的（不带任何方框/圆底）", left[3] == 0, str(left))
+
 # ---------------------------------------------------------------- 设置页
 print("\n== 设置页绿箭头 ==")
 sd = settings_dialog.SettingsDialog(config, lambda s: (True, ""))
 check("没有新版本时不显示", sd.btn_update.isHidden())
+check("开关叫「自动检查更新」（不只管启动那一次）",
+      sd.chk_update.text() == "自动检查更新", sd.chk_update.text())
+check("「上次检查」是可刷新的标签（不再是一次性 hint）",
+      hasattr(sd, "lbl_last") and sd.lbl_last.text().startswith("上次检查："))
 sd.close()
 
 sd2 = settings_dialog.SettingsDialog(config, lambda s: (True, ""), None,
@@ -94,6 +123,32 @@ sd2.btn_update.click()
 app.processEvents()
 check("点箭头后请求主程序打开更新窗口", sd2.wants_update)
 check("设置窗口随即关闭", sd2.isHidden())
+
+print("\n== 设置页开着的时候查到新版本（不必关掉重开） ==")
+sd3 = settings_dialog.SettingsDialog(config, lambda s: (True, ""))
+sd3.show()
+app.processEvents()
+check("刚打开时没有箭头", sd3.btn_update.isHidden())
+sd3.set_update_info(info)
+app.processEvents()
+check("当场亮出绿箭头", not sd3.btn_update.isHidden())
+check("提示写清新版本号", "1.1.7" in sd3.btn_update.toolTip(), sd3.btn_update.toolTip())
+sd3.set_update_info(None)
+check("确认没有新版本时当场收起", sd3.btn_update.isHidden())
+
+print("\n== 设置页「立即检查」 ==")
+fired = []
+sd3.check_requested.connect(lambda: fired.append(1))
+check("有「立即检查」按钮", sd3.btn_check.text() == "立即检查", sd3.btn_check.text())
+sd3.btn_check.click()
+app.processEvents()
+check("点它会请求检查", len(fired) == 1, str(fired))
+check("先进入「检查中…」", sd3.btn_check.text() == "检查中…", sd3.btn_check.text())
+check("检查中按钮不可重复点", not sd3.btn_check.isEnabled())
+sd3.set_check_result("已是最新版本")
+check("结果回来后恢复按钮", sd3.btn_check.text() == "立即检查")
+check("上次检查带上结果", "已是最新版本" in sd3.lbl_last.text(), sd3.lbl_last.text())
+sd3.close()
 
 # ---------------------------------------------------------------- 弹窗文案
 print("\n== 更新弹窗文案 ==")
@@ -135,6 +190,13 @@ start = src.index("def hide_to_tray")
 body = src[start:src.index("def on_main_close", start)]
 check("隐藏到托盘每次都提示（没有只弹一次的门闩）", "_tray_tip_shown" not in body)
 check("隐藏到托盘确实调用了提示", "Toast.show_toast" in body)
+
+print("\n== 主程序接线 ==")
+check("托盘菜单在有新版本时也写明版本", "点这里更新" in src)
+check("设置页「立即检查」走同一个入口", "self._on_settings_check" in src)
+check("设置页拿到只探测的接口", "probe_hotkey=self._probe_hotkey" in src)
+check("设置页会被主程序记住（好回填状态）", "self._settings_dlg = dlg" in src)
+check("查到新版本时同步推给设置页", "dlg.set_update_info(info)" in src)
 
 # ---------------------------------------------------------------- 提示本身
 print("\n== 右下角提示能否显示 ==")

@@ -30,17 +30,26 @@ SERVER_NAME = "WoAiJieTu.SingleInstance.v1"
 
 # 启动后多久去问 GitHub（留出时间给界面先起来）
 UPDATE_DELAY_MS = 6000
-# 常驻期间两次自动检查之间至少隔多久（启动那一次不受这个限制）
-UPDATE_INTERVAL = 6 * 3600
+# 常驻期间两次自动检查之间至少隔多久（启动 / 重新打开 / 手动检查都不受这个限制）
+UPDATE_INTERVAL = 12 * 3600
 # 运行期间多久看一眼「该不该查了」。托盘程序可能几天不退出，只在启动时查
-# 就永远等不到新版本；这里每小时醒一次，真正请求仍受 UPDATE_INTERVAL 限制。
-UPDATE_POLL_MS = 60 * 60 * 1000
+# 就永远等不到新版本；这里 10 分钟醒一次，真正请求仍受 UPDATE_INTERVAL 限制。
+UPDATE_POLL_MS = 10 * 60 * 1000
+# 软件已经在托盘里，用户又打开了一次（第二个进程被合并进来）：顺手补查一次，
+# 但一分钟内反复点不会反复请求。
+WAKE_CHECK_GAP = 60
+
+# 一次更新检查的四种来源。要不要真的去请求，全部由 check_allowed() 判断。
+CHECK_STARTUP = "startup"      # 进程刚起来
+CHECK_WAKE = "wake"            # 已在托盘常驻，用户又打开了一次
+CHECK_TIMER = "timer"          # 常驻期间到点自动查
+CHECK_MANUAL = "manual"        # 用户主动点「检查更新 / 立即检查」
 
 
 def update_due(last_ts, now=None, interval=UPDATE_INTERVAL) -> bool:
     """常驻期间是否到了该自动检查的时候。
 
-    只用于定时器那一路；启动那一次走 _startup_update_check，不受这里限制。
+    只用于定时器那一路；启动那一次走 CHECK_STARTUP，不受这里限制。
     """
     try:
         last_ts = int(last_ts or 0)
@@ -49,6 +58,44 @@ def update_due(last_ts, now=None, interval=UPDATE_INTERVAL) -> bool:
     if last_ts <= 0:
         return True
     return (now if now is not None else time.time()) - last_ts >= interval
+
+
+def check_allowed(trigger, last_ts=0, wake_ts=0, now=None, enabled=True) -> bool:
+    """这一次要不要真的去问 GitHub —— 启动 / 重新打开 / 定时 / 手动共用这套判断。
+
+    规则（四个入口一视同仁，不再各写一套）：
+      * 关掉「自动检查更新」后，自动的三条路都不查；手动仍然照查
+      * 启动：每次启动都查一次，不看节流（否则「刚查过 -> 重启」就永远不提示）
+      * 重新打开（已有进程被唤醒）：一分钟内只补查一次，避免连点就连续请求
+      * 定时：距上次检查满 12 小时才查
+      * 手动：随时查
+    """
+    if trigger == CHECK_MANUAL:
+        return True
+    if not enabled:
+        return False
+    now = time.time() if now is None else now
+    if trigger == CHECK_TIMER:
+        return update_due(last_ts, now=now)
+    if trigger == CHECK_WAKE:
+        try:
+            wake_ts = float(wake_ts or 0)
+        except (TypeError, ValueError):
+            wake_ts = 0.0
+        return (now - wake_ts) >= WAKE_CHECK_GAP
+    return True                 # CHECK_STARTUP
+
+
+def check_result_text(kind: str, version: str = "") -> str:
+    """写进配置、显示在设置页「上次检查」后面的那句结果（纯函数）。"""
+    if kind == "found":
+        ver = (version or "").strip()
+        return "发现新版本 %s" % ver if ver else "发现新版本"
+    if kind == "latest":
+        return "已是最新版本"
+    if kind == "failed":
+        return "检查失败"
+    return ""
 
 
 def update_outcome(pending, current) -> str:
@@ -107,6 +154,11 @@ class AppController(QObject):
         self._hide_rect = QRect()
         self._checker = None
         self._update_dlg = None
+        self._settings_dlg = None
+        self._check_trigger = CHECK_TIMER
+        self._last_wake_check = 0.0
+        # 已经为哪个版本弹过「发现新版本」窗口；用户点过「稍后」就不再反复弹
+        self._prompted_version = ""
         # 已经查到但还没安装的新版本：主界面和设置页靠它亮绿箭头
         self._available_update = None
         # 常驻托盘时也要持续发现新版本，不能只靠「下次启动」
@@ -196,7 +248,12 @@ class AppController(QObject):
 
         menu.addSeparator()
         act_update = menu.addAction("检查更新…")
-        act_update.triggered.connect(lambda: self.check_updates(silent=False))
+        if self._available_update is not None:
+            ver = (getattr(self._available_update, "version", "") or "").strip()
+            act_update.setText("发现新版本 %s，点这里更新…" % ver if ver
+                               else "发现新版本，点这里更新…")
+        act_update.triggered.connect(
+            lambda: self.request_update_check(CHECK_MANUAL))
 
         menu.addSeparator()
         act_quit = menu.addAction("退出")
@@ -208,6 +265,8 @@ class AppController(QObject):
     def _on_tray_activated(self, reason):
         if reason in (QSystemTrayIcon.Trigger, QSystemTrayIcon.DoubleClick):
             self.show_main()
+            # 从托盘「打开软件」也当成一次重新打开：一分钟内最多补查一次
+            self.request_update_check(CHECK_WAKE)
 
     def _on_second_instance(self):
         conn = self.server.nextPendingConnection()
@@ -215,6 +274,10 @@ class AppController(QObject):
             conn.readyRead.connect(conn.readAll)
             conn.disconnected.connect(conn.deleteLater)
         self.show_main()
+        # 「重新打开软件」对托盘程序来说就是走到了这里：进程不会重启，
+        # 所以启动检查根本不会跑。这里必须自己补一次，否则用户会以为
+        # 自己重启过了、却始终等不到新版本提示。
+        self.request_update_check(CHECK_WAKE)
 
     # ------------------------------------------------------------ 窗口
     def show_main(self):
@@ -344,37 +407,53 @@ class AppController(QObject):
 
     # ------------------------------------------------------------ 更新
     def _startup_update_check(self):
-        """启动后在后台问一次，**不看** 6 小时节流。
+        """进程起来后问一次，**不看** 12 小时节流。
 
         节流时间戳在每次检查时都会刷新（包括用户手动点的那次），如果启动也
         看它，就会出现「刚手动查过 -> 重启 -> 明明有新版本却不提示」。
         启动是低频事件，多问一次的成本可以忽略。
         """
-        if not config.get("check_update"):
-            return
-        QTimer.singleShot(UPDATE_DELAY_MS, lambda: self.check_updates(silent=True))
+        QTimer.singleShot(UPDATE_DELAY_MS,
+                          lambda: self.request_update_check(CHECK_STARTUP))
 
     def _schedule_update_check(self):
-        """常驻期间按频率问一次 GitHub；关掉「自动检查」就完全不问。"""
-        if not config.get("check_update"):
-            return
-        if not update_due(config.get("update_last_check")):
-            return
-        QTimer.singleShot(UPDATE_DELAY_MS, lambda: self.check_updates(silent=True))
+        """常驻期间看一眼「该不该查了」；真正请求仍受 12 小时节流限制。"""
+        self.request_update_check(CHECK_TIMER)
 
-    def check_updates(self, silent: bool = False):
-        if self._checker is not None or self._update_dlg is not None:
-            return
-        # 先记时间：失败了也别每次开机都重试，6 小时后再来
+    def request_update_check(self, trigger=CHECK_TIMER) -> bool:
+        """所有更新检查的唯一入口（启动 / 重新打开 / 定时 / 手动）。
+
+        判断「这次要不要真的去问」统一走 check_allowed()，不会出现某条路
+        绕过节流、或者查完了却忘了刷新「上次检查」时间的情况。
+        """
+        if not check_allowed(trigger,
+                             config.get("update_last_check"),
+                             self._last_wake_check,
+                             enabled=bool(config.get("check_update"))):
+            return False
+        if self._checker is not None:
+            if trigger == CHECK_MANUAL:
+                Toast.show_toast("正在检查更新", "上一次检查还没结束，请稍候…",
+                                 kind="info", timeout=1800)
+            return False                     # 上一次还没回结果，别并发
+        if trigger == CHECK_WAKE:
+            self._last_wake_check = time.time()
+        self._check_trigger = trigger
+        # 先记时间：失败了也别每次开机都重试，到下个周期再来
         config.set("update_last_check", int(time.time()))
         config.save()
+        dlg = self._settings_dialog()
+        if dlg is not None:
+            dlg.set_checking(True)
         self._checker = UpdateChecker(self)
         self._checker.found.connect(self._on_update_found)
-        self._checker.latest.connect(lambda ver: self._on_update_latest(ver, silent))
-        self._checker.failed.connect(lambda msg: self._on_update_failed(msg, silent))
+        self._checker.latest.connect(self._on_update_latest)
+        self._checker.failed.connect(self._on_update_failed)
         self._checker.check(APP_VERSION)
-        if not silent:
-            Toast.show_toast("正在检查更新", "正在获取最新版本信息…", kind="info", timeout=2000)
+        if trigger == CHECK_MANUAL:
+            Toast.show_toast("正在检查更新", "正在获取最新版本信息…",
+                             kind="info", timeout=2000)
+        return True
 
     def _drop_checker(self):
         checker = self._checker
@@ -382,39 +461,98 @@ class AppController(QObject):
         if checker is not None:
             checker.deleteLater()
 
+    def _settings_dialog(self):
+        dlg = self._settings_dlg
+        if dlg is None:
+            return None
+        try:
+            dlg.isVisible()              # 窗口已被销毁时这里会抛 RuntimeError
+        except RuntimeError:
+            self._settings_dlg = None
+            return None
+        return dlg
+
     def _set_update_available(self, info):
-        """记住「有没有新版本」，主界面与设置页的绿箭头都跟着它走。"""
+        """记住「有没有新版本」，主界面、设置页、托盘菜单都跟着它走。"""
         self._available_update = info
         self.win.set_update_available(info)
+        self._refresh_tray_menu()
+        dlg = self._settings_dialog()
+        if dlg is not None:
+            # 设置页正开着的时候查到新版本：箭头要当场亮起来，不能等关掉重开
+            dlg.set_update_info(info)
+
+    def _remember_result(self, kind: str, version: str = ""):
+        text = check_result_text(kind, version)
+        config.set("update_last_result", text)
+        config.save()
+        dlg = self._settings_dialog()
+        if dlg is not None:
+            dlg.set_check_result(text)
 
     def _on_update_found(self, info):
         self._drop_checker()
+        ver = getattr(info, "version", "") or ""
+        same = (self._available_update is not None and
+                (getattr(self._available_update, "version", "") or "") == ver)
         self._set_update_available(info)
+        self._remember_result("found", ver)
+        if same and self._prompted_version == ver:
+            # 同一个版本已经弹过一次、用户点了「稍后」：绿箭头还亮着，
+            # 就别每次打开窗口都再糊他一脸弹窗了。
+            return
         self._open_update_dialog(info, MODE_NEW)
 
-    def _on_update_latest(self, version, silent):
+    def _on_update_latest(self, version):
         self._drop_checker()
         self._set_update_available(None)
-        if not silent:
+        self._remember_result("latest")
+        # 自动检查安静收场，只有用户自己点的那一次才需要弹「已是最新」
+        if self._check_trigger == CHECK_MANUAL:
             self._open_update_dialog(None, MODE_LATEST)
 
-    def _on_update_failed(self, message, silent):
+    def _on_update_failed(self, message):
         self._drop_checker()
-        if not silent:
+        self._remember_result("failed")
+        if self._check_trigger == CHECK_MANUAL:
             self._open_update_dialog(None, MODE_ERROR, message)
 
+    def _live_update_dialog(self):
+        """当前那个更新窗口还能不能用；已经跟着父窗口一起关掉的就清掉。"""
+        dlg = self._update_dlg
+        if dlg is None:
+            return None
+        try:
+            if dlg.isVisible():
+                return dlg
+        except RuntimeError:
+            pass
+        self._update_dlg = None
+        try:
+            dlg.deleteLater()
+        except RuntimeError:
+            pass
+        return None
+
     def _open_update_dialog(self, info, mode, message: str = ""):
-        if self._update_dlg is not None:
-            self._update_dlg.raise_()
-            self._update_dlg.activateWindow()
+        dlg = self._live_update_dialog()
+        if dlg is not None:
+            dlg.raise_()
+            dlg.activateWindow()
             return
-        parent = self.win if self.win.isVisible() else None
+        # 设置页是模态窗口，别的窗口在它开着的时候点不动 —— 所以查到新版本时
+        # 把更新窗口挂到设置页下面，用户不用先关设置才能点「立即更新」。
+        parent = self._settings_dialog()
+        if parent is None:
+            parent = self.win if self.win.isVisible() else None
         dlg = UpdateDialog(info=info, message=message, mode=mode, parent=parent)
         dlg.setWindowFlag(Qt.WindowStaysOnTopHint, True)
         dlg.ready_to_install.connect(self._install_update)
         dlg.retry_requested.connect(self._retry_check)
         dlg.finished.connect(self._on_update_dialog_closed)
         self._update_dlg = dlg
+        if mode == MODE_NEW and info is not None:
+            self._prompted_version = getattr(info, "version", "") or ""
         dlg.show()
         dlg.raise_()
         dlg.activateWindow()
@@ -423,18 +561,30 @@ class AppController(QObject):
         self._update_dlg = None
 
     def _retry_check(self):
-        QTimer.singleShot(200, lambda: self.check_updates(silent=False))
+        QTimer.singleShot(200, lambda: self.request_update_check(CHECK_MANUAL))
 
     def show_update(self):
         """点绿箭头：已经知道有新版本就直接开窗口，否则现查一次。"""
-        if self._update_dlg is not None:
-            self._update_dlg.raise_()
-            self._update_dlg.activateWindow()
+        dlg = self._live_update_dialog()
+        if dlg is not None:
+            dlg.raise_()
+            dlg.activateWindow()
             return
         if self._available_update is not None:
             self._open_update_dialog(self._available_update, MODE_NEW)
         else:
-            self.check_updates(silent=False)
+            self.request_update_check(CHECK_MANUAL)
+
+    def _on_settings_check(self):
+        """设置页里点「立即检查」：和托盘菜单、绿箭头走同一套判断。"""
+        ok = self.request_update_check(CHECK_MANUAL)
+        dlg = self._settings_dialog()
+        if dlg is None:
+            return
+        if ok or self._checker is not None:
+            dlg.set_checking(True)
+        else:
+            dlg.set_check_result()
 
     def _install_update(self, installer_path: str):
         # 装之前先落回执：新版本第一次起来时靠它判断「这次到底装成了没有」
@@ -510,10 +660,15 @@ class AppController(QObject):
         self.hotkey.set_enabled(False)
         try:
             dlg = SettingsDialog(config, self._try_apply_hotkey, None,
-                                 update_info=self._available_update)
+                                 update_info=self._available_update,
+                                 probe_hotkey=self._probe_hotkey)
+            dlg.check_requested.connect(self._on_settings_check)
+            # 设置页开着的时候查到新版本，箭头和「上次检查」要能当场刷新
+            self._settings_dlg = dlg
             accepted = dlg.exec_() == QDialog.Accepted
             wants_update = bool(getattr(dlg, "wants_update", False))
         finally:
+            self._settings_dlg = None
             self.hotkey.set_enabled(True)
         if accepted:
             self.win.set_hotkey_text(config.get("hotkey"))
@@ -528,6 +683,10 @@ class AppController(QObject):
 
     def _try_apply_hotkey(self, sequence: str):
         return self.hotkey.register(normalize_sequence(sequence))
+
+    def _probe_hotkey(self, sequence: str):
+        """设置里录完组合键就调：只探测是否被占用，不改当前热键。"""
+        return self.hotkey.probe_conflict(normalize_sequence(sequence))
 
 
 def main():

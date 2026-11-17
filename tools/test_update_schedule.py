@@ -1,13 +1,19 @@
 # -*- coding: utf-8 -*-
 """更新检查时机自检。
 
-背景：曾经出现过「手动查过一次 -> 重启软件 -> 明明有新版本却不提示」，
-原因是启动检查也看 6 小时节流，而手动检查会把时间戳刷新。
+背景：曾经出现过「重新打开软件 -> 明明有新版本却没提示」。根因有两个：
+    1. 托盘程序「重新打开」只是唤醒已有进程，进程根本没重启，启动检查不跑；
+    2. 启动检查与定时检查各写了一套判断，容易改着改着就断了。
+
+现在所有入口（启动 / 重新打开 / 定时 / 手动）都走 request_update_check()
++ check_allowed() 一套判断。
 
 覆盖：
-    1. 节流判定的边界（0 / 5 小时 / 6 小时整 / 7 小时）
-    2. 启动检查不读节流时间戳（防止改回去）
-    3. 设置页「上次检查」文案的几种情况
+    1. 12 小时节流的边界
+    2. 四种触发来源的放行规则（含「重新打开」的一分钟去重）
+    3. 接线检查（谁调用谁，防止再分裂出第二套判断）
+    4. 设置页「上次检查」文案（时间 + 结果）
+    5. 更新结果回执（决定弹不弹「更新完成」）
 
 用法：
     python tools/test_update_schedule.py
@@ -36,11 +42,16 @@ def check(name, ok, detail=""):
 
 
 class FakeCfg:
-    def __init__(self, ts):
+    def __init__(self, ts, result=""):
         self._ts = ts
+        self._result = result
 
     def get(self, key, default=None):
-        return self._ts if key == "update_last_check" else default
+        if key == "update_last_check":
+            return self._ts
+        if key == "update_last_result":
+            return self._result
+        return default
 
 
 def main_():
@@ -48,14 +59,46 @@ def main_():
     now = time.time()
     print("更新检查时机自检")
 
-    print("\n== 常驻期间的 6 小时节流 ==")
+    print("\n== 常驻期间的 12 小时节流 ==")
+    check("间隔常量是 12 小时", main.UPDATE_INTERVAL == 12 * 3600,
+          str(main.UPDATE_INTERVAL))
     check("从没查过 -> 该查", main.update_due(0, now=now) is True)
-    check("5 小时前查过 -> 还不查", main.update_due(now - 5 * 3600, now=now) is False)
-    check("6 小时整 -> 该查", main.update_due(now - 6 * 3600, now=now) is True)
-    check("7 小时前查过 -> 该查", main.update_due(now - 7 * 3600, now=now) is True)
+    check("11 小时前查过 -> 还不查", main.update_due(now - 11 * 3600, now=now) is False)
+    check("11 小时 59 分 -> 还不查",
+          main.update_due(now - (12 * 3600 - 60), now=now) is False)
+    check("12 小时整 -> 该查", main.update_due(now - 12 * 3600, now=now) is True)
+    check("13 小时前查过 -> 该查", main.update_due(now - 13 * 3600, now=now) is True)
     check("时间戳是脏数据 -> 该查", main.update_due("oops", now=now) is True)
 
-    print("\n== 启动检查不受节流影响 ==")
+    print("\n== 四种触发来源共用一套判断 ==")
+    # 启动：每次启动都查，不看节流
+    check("启动：刚查过也要查",
+          main.check_allowed(main.CHECK_STARTUP, last_ts=now - 60, now=now) is True)
+    check("启动：关掉自动检查就不查",
+          main.check_allowed(main.CHECK_STARTUP, now=now, enabled=False) is False)
+    # 重新打开（已有进程被唤醒）
+    check("重新打开：第一次总是查",
+          main.check_allowed(main.CHECK_WAKE, wake_ts=0, now=now) is True)
+    check("重新打开：一分钟内不重复查",
+          main.check_allowed(main.CHECK_WAKE, wake_ts=now - 5, now=now) is False)
+    check("重新打开：超过一分钟再查",
+          main.check_allowed(main.CHECK_WAKE, wake_ts=now - 61, now=now) is True)
+    check("重新打开：关掉自动检查就不查",
+          main.check_allowed(main.CHECK_WAKE, now=now, enabled=False) is False)
+    # 定时
+    check("定时：不到 12 小时不查",
+          main.check_allowed(main.CHECK_TIMER, last_ts=now - 3600, now=now) is False)
+    check("定时：满 12 小时查",
+          main.check_allowed(main.CHECK_TIMER, last_ts=now - 13 * 3600, now=now) is True)
+    check("定时：关掉自动检查就不查",
+          main.check_allowed(main.CHECK_TIMER, last_ts=0, now=now, enabled=False) is False)
+    # 手动
+    check("手动：随时查",
+          main.check_allowed(main.CHECK_MANUAL, last_ts=now, now=now) is True)
+    check("手动：关掉自动检查也能查",
+          main.check_allowed(main.CHECK_MANUAL, now=now, enabled=False) is True)
+
+    print("\n== 接线检查（防止再分裂出第二套判断） ==")
     src = io.open(main.__file__, encoding="utf-8").read()
     start = src.index("def _startup_update_check")
     end = src.index("def _schedule_update_check", start)
@@ -63,19 +106,33 @@ def main_():
     check("启动检查里没有读 update_last_check",
           "update_last_check" not in body,
           "命中说明又被节流挡住了")
-    check("启动检查只受「自动检查」开关控制",
-          'config.get("check_update")' in body)
-    check("启动时会调用启动检查（而不是节流那一路）",
-          "self._startup_update_check()" in src)
+    check("启动检查走统一入口（CHECK_STARTUP）",
+          "request_update_check(CHECK_STARTUP)" in body)
+    sched = src[src.index("def _schedule_update_check"):
+                src.index("def request_update_check")]
+    check("定时检查走统一入口（CHECK_TIMER）",
+          "request_update_check(CHECK_TIMER)" in sched)
+    check("托盘菜单走统一入口（CHECK_MANUAL）",
+          "request_update_check(CHECK_MANUAL)" in src)
+    check("「重新打开」也会补查一次",
+          "request_update_check(CHECK_WAKE)" in src)
+    check("不再有第二套 check_updates 判断",
+          "def check_updates" not in src)
+    check("启动时启动了常驻轮询定时器", "self._update_timer.start()" in src)
+    check("公共入口只有一处发请求", src.count("UpdateChecker(self)") == 1)
 
     print("\n== 设置页「上次检查」文案 ==")
     txt = SettingsDialog._last_check_text(FakeCfg(0))
     check("没有记录", "暂无记录" in txt, txt)
     check("不把检查频率塞进设置页",
-          "6 小时" not in SettingsDialog._last_check_text(FakeCfg(int(now))))
+          "12 小时" not in SettingsDialog._last_check_text(FakeCfg(int(now))))
 
-    txt = SettingsDialog._last_check_text(FakeCfg(int(now)))
+    txt = SettingsDialog._last_check_text(FakeCfg(int(now), "已是最新版本"))
     check("今天", "今天" in txt, txt)
+    check("带上结果：已是最新版本", "已是最新版本" in txt, txt)
+
+    txt = SettingsDialog._last_check_text(FakeCfg(int(now), "发现新版本 1.1.8"))
+    check("带上结果：发现新版本", "发现新版本 1.1.8" in txt, txt)
 
     yest = datetime.datetime.now() - datetime.timedelta(days=1)
     txt = SettingsDialog._last_check_text(FakeCfg(int(yest.timestamp())))
@@ -84,6 +141,13 @@ def main_():
     old = datetime.datetime(2020, 1, 2, 3, 4)
     txt = SettingsDialog._last_check_text(FakeCfg(int(old.timestamp())))
     check("更早显示完整日期", "2020-01-02" in txt, txt)
+
+    print("\n== 检查结果文案 ==")
+    check("发现新版本", main.check_result_text("found", "1.1.8") == "发现新版本 1.1.8")
+    check("发现新版本但版本不明", main.check_result_text("found", "") == "发现新版本")
+    check("已是最新", main.check_result_text("latest") == "已是最新版本")
+    check("失败", main.check_result_text("failed") == "检查失败")
+    check("未知不硬凑", main.check_result_text("") == "")
 
     print("\n== 更新结果回执（决定弹不弹「更新完成」） ==")
     check("没有回执", main.update_outcome({}, "1.1.6") == "")
@@ -97,7 +161,7 @@ def main_():
     check("回到更早版本也算失败",
           main.update_outcome({"version": "1.1.10"}, "1.1.9") == "failed")
 
-    print("\n== 接线检查（防止改着改着断掉） ==")
+    print("\n== 其它接线 ==")
     check("启动时会回报更新结果", "self._notify_update_result)" in src)
     check("安装前会落回执", "write_pending(" in src)
     check("安装目录不可写时不硬静默", "install_dir_writable(" in src)

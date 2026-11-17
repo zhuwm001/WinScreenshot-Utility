@@ -188,21 +188,19 @@ def _draw(p: QPainter, kind: str, s: float, color: QColor, w: float):
         p.drawLine(QPointF(s * 0.42, s * 0.76), QPointF(s - pad * 0.8, s * 0.26))
 
     elif kind == "update":
-        # 绿色圆底 + 白色向下箭头：有新版本时的提示徽标
-        p.setPen(Qt.NoPen)
-        p.setBrush(UPDATE_GREEN)
-        p.drawEllipse(QRectF(0.4, 0.4, s - 0.8, s - 0.8))
-
+        # 「发现新版本」标记：只保留向下的箭头和它下面那道横线，纯绿色、无底色。
+        # （外面那层蓝色圆底 / 圆角方框都不要，免得在浅色标题栏上糊成一团。）
         cx = s / 2.0
-        top, bottom = s * 0.30, s * 0.66
-        head = s * 0.15
-        pen = QPen(WHITE, max(1.5, s * 0.11), Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
+        top, tip = s * 0.17, s * 0.60
+        head = s * 0.19
+        pen = QPen(UPDATE_GREEN, max(1.8, s * 0.115),
+                   Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
         p.setPen(pen)
         p.setBrush(Qt.NoBrush)
-        p.drawLine(QPointF(cx, top), QPointF(cx, bottom))
-        p.drawLine(QPointF(cx - head, bottom - head), QPointF(cx, bottom))
-        p.drawLine(QPointF(cx + head, bottom - head), QPointF(cx, bottom))
-        p.drawLine(QPointF(cx - s * 0.20, s * 0.80), QPointF(cx + s * 0.20, s * 0.80))
+        p.drawLine(QPointF(cx, top), QPointF(cx, tip))
+        p.drawLine(QPointF(cx - head, tip - head), QPointF(cx, tip))
+        p.drawLine(QPointF(cx + head, tip - head), QPointF(cx, tip))
+        p.drawLine(QPointF(cx - s * 0.27, s * 0.83), QPointF(cx + s * 0.27, s * 0.83))
 
     elif kind == "tray":
         # 托盘槽 + 向下的箭头（表示收进托盘）

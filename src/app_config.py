@@ -5,7 +5,7 @@ import os
 
 APP_NAME = "我爱截图"
 APP_ID = "WoAiJieTu"
-APP_VERSION = "1.1.7"
+APP_VERSION = "1.1.8"
 
 DEFAULTS = {
     "config_schema": 2,              # 配置结构版本，用于旧配置迁移
@@ -16,8 +16,9 @@ DEFAULTS = {
     "text_size": 20,                 # 文字标注字号（像素）
     "text_bold": False,              # 文字标注是否粗体
     "auto_start": False,             # 开机自启
-    "check_update": True,            # 启动时自动检查新版本
+    "check_update": True,            # 自动检查新版本（启动一次 + 常驻每 12 小时）
     "update_last_check": 0,          # 上次检查更新的时间戳
+    "update_last_result": "",        # 上次检查的结果（已是最新 / 发现新版本 x / 检查失败）
 }
 
 CURRENT_SCHEMA = 2

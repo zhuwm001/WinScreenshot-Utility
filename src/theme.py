@@ -13,6 +13,7 @@ BORDER = "#E6EAF2"
 
 DANGER = "#FF3B30"
 WARN = "#E07B00"
+SUCCESS = "#16A34A"
 
 FONT_FAMILY = '"Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI", sans-serif'
 
@@ -158,6 +159,20 @@ def dialog_qss():
         background: {PRIMARY_DARK};
         border-color: {PRIMARY_DARK};
         color: #FFFFFF;
+    }}
+    QPushButton#linkBtn {{
+        font-size: 12px;
+        color: {PRIMARY};
+        border: none;
+        background: transparent;
+        padding: 2px 6px;
+    }}
+    QPushButton#linkBtn:hover {{
+        color: {PRIMARY_DARK};
+        text-decoration: underline;
+    }}
+    QPushButton#linkBtn:disabled {{
+        color: #A8B0C0;
     }}
     QLineEdit#hotkey {{
         font-size: 14px;
