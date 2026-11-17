@@ -25,6 +25,11 @@ OPENSSL_DLLS = (
     "libcrypto-1_1-x64.dll",
 )
 
+# 更新检查还有一条兜底通道：Qt 的 TLS 起不来时改用 Python 自带的 SSL 取清单。
+# 这几个模块必须显式带上 —— PyInstaller 的静态分析偶尔会漏掉 urllib 里
+# 间接导入的 ssl，漏了就等于兜底通道也一起死掉，而且只在装好的软件里才暴露。
+HIDDEN_IMPORTS = ("ssl", "_ssl", "urllib.request", "http.client", "threading")
+
 
 def _app_version() -> str:
     """默认版本号直接读源码，免得打包脚本里的数字和 app_config 对不上。"""
@@ -105,6 +110,8 @@ def main():
         "--specpath", WORK,
         "--log-level", "WARN",
     ]
+    for mod in HIDDEN_IMPORTS:
+        cmd += ["--hidden-import", mod]
     cmd.append(os.path.join(SRC, "main.py"))
     print("running:", " ".join(cmd))
     result = subprocess.run(cmd, cwd=ROOT)

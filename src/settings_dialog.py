@@ -1,16 +1,18 @@
 # -*- coding: utf-8 -*-
 """设置对话框：截图行为、关闭行为、开机启动、全局快捷键。"""
 import datetime
+import os
 
 from PyQt5.QtCore import QSize, Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QIcon
 from PyQt5.QtWidgets import (
-    QCheckBox, QDialog, QFrame, QHBoxLayout, QLabel, QLineEdit, QPushButton,
-    QRadioButton, QToolButton, QVBoxLayout,
+    QCheckBox, QDialog, QFrame, QHBoxLayout, QLabel, QLineEdit, QMessageBox,
+    QPushButton, QRadioButton, QToolButton, QVBoxLayout,
 )
 
 import icons
 import theme
+import update_log
 from app_config import APP_NAME, APP_VERSION, DEFAULTS
 import autostart
 from hotkey import contains_alt
@@ -301,15 +303,25 @@ class SettingsDialog(QDialog):
         self.btn_check.setFocusPolicy(Qt.NoFocus)
         self.btn_check.clicked.connect(self._request_check)
         row.addWidget(self.btn_check)
+        row.addSpacing(10)
+
+        # 查不出东西的时候，日志比界面有用：每一步都记着，点一下就能看
+        self.btn_log = QPushButton("查看日志", self)
+        self.btn_log.setObjectName("linkBtn")
+        self.btn_log.setCursor(Qt.PointingHandCursor)
+        self.btn_log.setFocusPolicy(Qt.NoFocus)
+        self.btn_log.setToolTip("打开更新检查日志")
+        self.btn_log.clicked.connect(self._open_log)
+        row.addWidget(self.btn_log)
         row.addSpacing(12)
 
         self.chk_update = QCheckBox("自动检查更新")
         self.chk_update.setChecked(bool(cfg.get("check_update")))
         row.addWidget(self.chk_update)
         body.addLayout(row)
-        body.addWidget(self._hint("启动时自动检查一次，常驻托盘时每 12 小时检查一次；"
+        body.addWidget(self._hint("每次启动软件检查一次，常驻托盘时每 12 小时检查一次；"
                                  "发现新版本会在软件里提示，点「立即更新」自动下载、"
-                                 "静默安装并重开。"))
+                                 "静默安装并重开。查不到时点「查看日志」看具体原因。"))
         # 让「到底有没有在查、查出什么」都看得见 —— 怀疑没提示时先看这一行
         self.lbl_last = self._hint(self._last_check_text(cfg))
         body.addWidget(self.lbl_last)
@@ -419,6 +431,20 @@ class SettingsDialog(QDialog):
             return
         self.set_checking(True)
         self.check_requested.emit()
+
+    def _open_log(self):
+        """用系统默认程序打开 update.log（没有就提示一句）。"""
+        path = update_log.log_path()
+        if not os.path.exists(path):
+            QMessageBox.information(self, "还没有日志",
+                                    "还没检查过更新，所以暂时没有日志。\n"
+                                    "点一下「立即检查」就会生成。")
+            return
+        try:
+            os.startfile(path)          # noqa: S606  Windows 专用
+        except Exception as e:
+            QMessageBox.warning(self, "打不开日志",
+                                "请手动打开这个文件：\n%s\n\n%s" % (path, e))
 
     def set_checking(self, on: bool):
         self._checking = bool(on)

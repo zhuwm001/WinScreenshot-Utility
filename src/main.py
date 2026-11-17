@@ -25,23 +25,22 @@ from update import (UpdateChecker, clear_pending, cleanup_installers,
                     read_pending, running_exe, version_from_installer,
                     write_pending)
 from update_dialog import MODE_ERROR, MODE_LATEST, MODE_NEW, UpdateDialog
+from update_log import log as ulog
 
 SERVER_NAME = "WoAiJieTu.SingleInstance.v1"
 
-# 启动后多久去问 GitHub（留出时间给界面先起来）
-UPDATE_DELAY_MS = 6000
-# 常驻期间两次自动检查之间至少隔多久（启动 / 重新打开 / 手动检查都不受这个限制）
+# 启动后多久去问 GitHub（留出时间给界面先起来，但尽量在用户点开设置前问完）
+UPDATE_DELAY_MS = 2000
+# 常驻期间两次自动检查之间至少隔多久（启动、手动检查都不受这个限制）
 UPDATE_INTERVAL = 12 * 3600
 # 运行期间多久看一眼「该不该查了」。托盘程序可能几天不退出，只在启动时查
 # 就永远等不到新版本；这里 10 分钟醒一次，真正请求仍受 UPDATE_INTERVAL 限制。
 UPDATE_POLL_MS = 10 * 60 * 1000
-# 软件已经在托盘里，用户又打开了一次（第二个进程被合并进来）：顺手补查一次，
-# 但一分钟内反复点不会反复请求。
-WAKE_CHECK_GAP = 60
 
-# 一次更新检查的四种来源。要不要真的去请求，全部由 check_allowed() 判断。
+# 一次更新检查的来源。要不要真的去请求，全部由 check_allowed() 判断。
+# 只有三种：进程启动、常驻到点、用户手动。托盘里再打开一次（第二个进程被
+# 合并进已有进程）不算 —— 那种「打开」不是新会话，查了也是白查。
 CHECK_STARTUP = "startup"      # 进程刚起来
-CHECK_WAKE = "wake"            # 已在托盘常驻，用户又打开了一次
 CHECK_TIMER = "timer"          # 常驻期间到点自动查
 CHECK_MANUAL = "manual"        # 用户主动点「检查更新 / 立即检查」
 
@@ -60,13 +59,12 @@ def update_due(last_ts, now=None, interval=UPDATE_INTERVAL) -> bool:
     return (now if now is not None else time.time()) - last_ts >= interval
 
 
-def check_allowed(trigger, last_ts=0, wake_ts=0, now=None, enabled=True) -> bool:
-    """这一次要不要真的去问 GitHub —— 启动 / 重新打开 / 定时 / 手动共用这套判断。
+def check_allowed(trigger, last_ts=0, now=None, enabled=True) -> bool:
+    """这一次要不要真的去问 GitHub —— 启动 / 定时 / 手动共用这套判断。
 
-    规则（四个入口一视同仁，不再各写一套）：
-      * 关掉「自动检查更新」后，自动的三条路都不查；手动仍然照查
+    规则（三个入口一视同仁，不再各写一套）：
+      * 关掉「自动检查更新」后，自动的两条路都不查；手动仍然照查
       * 启动：每次启动都查一次，不看节流（否则「刚查过 -> 重启」就永远不提示）
-      * 重新打开（已有进程被唤醒）：一分钟内只补查一次，避免连点就连续请求
       * 定时：距上次检查满 12 小时才查
       * 手动：随时查
     """
@@ -77,16 +75,20 @@ def check_allowed(trigger, last_ts=0, wake_ts=0, now=None, enabled=True) -> bool
     now = time.time() if now is None else now
     if trigger == CHECK_TIMER:
         return update_due(last_ts, now=now)
-    if trigger == CHECK_WAKE:
-        try:
-            wake_ts = float(wake_ts or 0)
-        except (TypeError, ValueError):
-            wake_ts = 0.0
-        return (now - wake_ts) >= WAKE_CHECK_GAP
     return True                 # CHECK_STARTUP
 
 
-def check_result_text(kind: str, version: str = "") -> str:
+def short_reason(text: str, limit: int = 26) -> str:
+    """把一长串错误压成一句话，塞进设置页那一行里。"""
+    t = (text or "").strip()
+    for tail in ("。", ".", "；", ";"):
+        t = t.rstrip(tail)
+    if len(t) <= limit:
+        return t
+    return t[:limit - 1] + "…"
+
+
+def check_result_text(kind: str, version: str = "", reason: str = "") -> str:
     """写进配置、显示在设置页「上次检查」后面的那句结果（纯函数）。"""
     if kind == "found":
         ver = (version or "").strip()
@@ -94,7 +96,8 @@ def check_result_text(kind: str, version: str = "") -> str:
     if kind == "latest":
         return "已是最新版本"
     if kind == "failed":
-        return "检查失败"
+        why = short_reason(reason)
+        return "检查失败：%s" % why if why else "检查失败"
     return ""
 
 
@@ -156,7 +159,6 @@ class AppController(QObject):
         self._update_dlg = None
         self._settings_dlg = None
         self._check_trigger = CHECK_TIMER
-        self._last_wake_check = 0.0
         # 已经为哪个版本弹过「发现新版本」窗口；用户点过「稍后」就不再反复弹
         self._prompted_version = ""
         # 已经查到但还没安装的新版本：主界面和设置页靠它亮绿箭头
@@ -265,19 +267,15 @@ class AppController(QObject):
     def _on_tray_activated(self, reason):
         if reason in (QSystemTrayIcon.Trigger, QSystemTrayIcon.DoubleClick):
             self.show_main()
-            # 从托盘「打开软件」也当成一次重新打开：一分钟内最多补查一次
-            self.request_update_check(CHECK_WAKE)
 
     def _on_second_instance(self):
         conn = self.server.nextPendingConnection()
         if conn is not None:
             conn.readyRead.connect(conn.readAll)
             conn.disconnected.connect(conn.deleteLater)
+        # 已有进程被唤醒（用户又点了一次图标）：只是把窗口叫出来，不查更新。
+        # 真正的「启动」是进程重开那一次，那条路在 start() 里查。
         self.show_main()
-        # 「重新打开软件」对托盘程序来说就是走到了这里：进程不会重启，
-        # 所以启动检查根本不会跑。这里必须自己补一次，否则用户会以为
-        # 自己重启过了、却始终等不到新版本提示。
-        self.request_update_check(CHECK_WAKE)
 
     # ------------------------------------------------------------ 窗口
     def show_main(self):
@@ -421,27 +419,29 @@ class AppController(QObject):
         self.request_update_check(CHECK_TIMER)
 
     def request_update_check(self, trigger=CHECK_TIMER) -> bool:
-        """所有更新检查的唯一入口（启动 / 重新打开 / 定时 / 手动）。
+        """所有更新检查的唯一入口（启动 / 定时 / 手动）。
 
         判断「这次要不要真的去问」统一走 check_allowed()，不会出现某条路
         绕过节流、或者查完了却忘了刷新「上次检查」时间的情况。
+        每次的决定都写进 update.log，事后不用靠猜。
         """
-        if not check_allowed(trigger,
-                             config.get("update_last_check"),
-                             self._last_wake_check,
-                             enabled=bool(config.get("check_update"))):
+        enabled = bool(config.get("check_update"))
+        if not check_allowed(trigger, config.get("update_last_check"),
+                             enabled=enabled):
+            if trigger != CHECK_TIMER:       # 定时器每 10 分钟问一次，别刷屏
+                ulog("跳过检查（%s）：自动检查已关闭或没到时间" % trigger)
             return False
         if self._checker is not None:
+            ulog("跳过检查（%s）：上一次还没结束" % trigger)
             if trigger == CHECK_MANUAL:
                 Toast.show_toast("正在检查更新", "上一次检查还没结束，请稍候…",
                                  kind="info", timeout=1800)
             return False                     # 上一次还没回结果，别并发
-        if trigger == CHECK_WAKE:
-            self._last_wake_check = time.time()
         self._check_trigger = trigger
         # 先记时间：失败了也别每次开机都重试，到下个周期再来
         config.set("update_last_check", int(time.time()))
         config.save()
+        ulog("触发检查（%s）" % trigger)
         dlg = self._settings_dialog()
         if dlg is not None:
             dlg.set_checking(True)
@@ -482,8 +482,8 @@ class AppController(QObject):
             # 设置页正开着的时候查到新版本：箭头要当场亮起来，不能等关掉重开
             dlg.set_update_info(info)
 
-    def _remember_result(self, kind: str, version: str = ""):
-        text = check_result_text(kind, version)
+    def _remember_result(self, kind: str, version: str = "", reason: str = ""):
+        text = check_result_text(kind, version, reason)
         config.set("update_last_result", text)
         config.save()
         dlg = self._settings_dialog()
@@ -513,7 +513,7 @@ class AppController(QObject):
 
     def _on_update_failed(self, message):
         self._drop_checker()
-        self._remember_result("failed")
+        self._remember_result("failed", reason=message)
         if self._check_trigger == CHECK_MANUAL:
             self._open_update_dialog(None, MODE_ERROR, message)
 

@@ -14,9 +14,12 @@ import hashlib
 import json
 import os
 import re
+import ssl
 import subprocess
 import sys
 import tempfile
+import threading
+import urllib.request
 
 from PyQt5.QtCore import QFile, QIODevice, QObject, QTimer, QUrl, pyqtSignal
 from PyQt5.QtNetwork import (
@@ -25,6 +28,7 @@ from PyQt5.QtNetwork import (
 
 from app_config import APP_NAME, APP_VERSION
 import manifest
+from update_log import log as ulog
 
 # ---------------------------------------------------------------- 常量
 # 只改这一行就能换仓库
@@ -378,17 +382,30 @@ def _http_hint(status: int) -> str:
 
 
 def _network_error(detail: str) -> str:
-    """把 Qt 的英文错误翻成人话；TLS 那条最容易让人以为是网络断了。"""
+    """把 Qt / urllib 的英文错误翻成人话；TLS 那条最容易让人以为是网络断了。"""
     detail = detail or "未知错误"
     low = detail.lower()
     if "tls initialization" in low or "ssl handshake" in low:
         return ("无法建立加密连接（%s）。请确认系统时间正确、网络能访问 GitHub；"
                 "如果用了代理，确认代理支持 HTTPS。" % detail)
-    if "host not found" in low or "unknown error" in low:
+    if "tunnel connection failed" in low or "proxyerror" in low or "proxy" in low:
+        return ("代理服务器没能连上 GitHub（%s）。请检查代理软件是否在运行，"
+                "或者临时关掉代理再试。" % detail)
+    m = re.search(r"http error (\d{3})", low)
+    if m:
+        return _http_hint(int(m.group(1)))
+    if "timed out" in low or "timeout" in low:
+        return "连接 GitHub 超时，请检查网络或代理后重试。"
+    if "host not found" in low or "unknown error" in low or "getaddrinfo" in low:
         return "解析不到 GitHub 域名（DNS 失败），请检查网络或代理设置。"
     if "connection refused" in low or "connection closed" in low:
         return "连接被中断（%s），可能是代理或防火墙拦截。" % detail
     return "网络连接失败：%s" % detail
+
+
+def _is_tls_error(detail: str) -> bool:
+    low = (detail or "").lower()
+    return "tls initialization" in low or "ssl handshake" in low
 
 
 class UpdateChecker(QObject):
@@ -396,6 +413,11 @@ class UpdateChecker(QObject):
 
     只认**签过名**的清单（latest.json）：拿不到或验签不过一律失败，
     绝不退回去用未签名的数据。
+
+    Qt 的 HTTPS 依赖它自己去加载 OpenSSL，个别 Win10/Win11 上会报
+    「TLS initialization failed」（组件没带全、被安全软件换掉、架构不对都可能）。
+    这时改用它自己进程里 Python 自带的 SSL 再取一次 —— 两条腿走路，
+    总比一声不响地「什么都没查到」强。全过程写 update.log。
     """
 
     found = pyqtSignal(object)     # ReleaseInfo
@@ -407,13 +429,29 @@ class UpdateChecker(QObject):
         self._nam = _make_nam(self)
         self._reply = None
         self._done = False
+        self._current = APP_VERSION
+        self._fallback_used = False
         self._timer = QTimer(self)
         self._timer.setSingleShot(True)
         self._timer.timeout.connect(self._on_timeout)
 
+    # ---------- 发信号（工作线程里也可能调，别让对象已销毁时崩掉） ----------
+    def _emit(self, sig, arg):
+        try:
+            sig.emit(arg)
+        except RuntimeError:
+            pass
+
     def check(self, current=APP_VERSION, timeout_ms=12000):
         self._current = current or APP_VERSION
+        self._timeout_s = max(1, int(timeout_ms / 1000))
         self._done = False
+        self._fallback_used = False
+        try:
+            ssl_text = ssl.OPENSSL_VERSION
+        except Exception:
+            ssl_text = "不可用"
+        ulog("开始检查更新：本地 %s（Python SSL：%s）" % (self._current, ssl_text))
         self._reply = self._nam.get(_request(MANIFEST_URL))
         self._reply.finished.connect(self._on_finished)
         self._timer.start(timeout_ms)
@@ -427,7 +465,8 @@ class UpdateChecker(QObject):
             self._reply.abort()
         except Exception:
             pass
-        self.failed.emit("连接 GitHub 超时，请检查网络或代理后重试。")
+        ulog("超时：%d 秒没响应" % getattr(self, "_timeout_s", 12))
+        self._emit(self.failed, "连接 GitHub 超时，请检查网络或代理后重试。")
 
     def _on_finished(self):
         if self._done:
@@ -445,29 +484,68 @@ class UpdateChecker(QObject):
         status = reply.attribute(QNetworkRequest.HttpStatusCodeAttribute) or 0
 
         if status and status != 200:
-            self.failed.emit(_http_hint(int(status)))
+            ulog("HTTP %s" % status)
+            self._emit(self.failed, _http_hint(int(status)))
             return
         if err:
-            self.failed.emit(_network_error(reply.errorString()))
+            detail = reply.errorString()
+            ulog("Qt 请求失败：%s" % detail)
+            if _is_tls_error(detail) and self._retry_with_stdlib():
+                return
+            self._emit(self.failed, _network_error(detail))
             return
 
+        self._handle_bytes(bytes(reply.readAll()))
+
+    # ---------- 拿到内容之后：解析 + 验签 + 比版本 ----------
+    def _handle_bytes(self, data: bytes):
+        ulog("收到清单 %d 字节" % len(data))
         try:
-            import json
-            doc = json.loads(bytes(reply.readAll()).decode("utf-8", "replace"))
+            doc = json.loads(data.decode("utf-8", "replace"))
         except Exception:
-            self.failed.emit("解析更新清单失败（内容不是合法 JSON）。")
+            ulog("清单不是合法 JSON")
+            self._emit(self.failed, "解析更新清单失败（内容不是合法 JSON）。")
             return
 
         payload, reason = manifest.verify_document(doc)
         if payload is None:
-            self.failed.emit("更新清单校验失败：%s" % reason)
+            ulog("验签失败：%s" % reason)
+            self._emit(self.failed, "更新清单校验失败：%s" % reason)
             return
 
+        remote = str(payload.get("version") or "")
         info = parse_manifest(payload, self._current)
         if info is None:
-            self.latest.emit(self._current)
+            ulog("远端 %s，不比本地 %s 新：已是最新" % (remote or "?", self._current))
+            self._emit(self.latest, self._current)
             return
-        self.found.emit(info)
+        ulog("远端 %s > 本地 %s：发现新版本" % (remote, self._current))
+        self._emit(self.found, info)
+
+    def _retry_with_stdlib(self):
+        """Qt 的 TLS 起不来：换 Python 自带的 SSL 再试一次（只试一次）。"""
+        if self._fallback_used:
+            return False
+        self._fallback_used = True
+        self._timer.stop()
+        ulog("改用 Python 自带的 SSL 重试")
+        threading.Thread(target=self._stdlib_fetch, daemon=True).start()
+        return True
+
+    def _stdlib_fetch(self):
+        try:
+            req = urllib.request.Request(
+                MANIFEST_URL,
+                headers={"User-Agent": USER_AGENT, "Cache-Control": "no-cache"})
+            with urllib.request.urlopen(req, timeout=12) as resp:
+                data = resp.read()
+        except Exception as e:
+            detail = "%s: %s" % (type(e).__name__, e)
+            ulog("备用通道也失败：%s" % detail)
+            self._emit(self.failed, _network_error(detail))
+            return
+        self._handle_bytes(data)
+
 
 
 class InstallerDownloader(QObject):
