@@ -95,6 +95,9 @@ class HotkeyEdit(QLineEdit):
     """点击后直接按键录制的输入框。"""
 
     valueChanged = pyqtSignal(str)
+    # 开始/结束录制 —— 只有这两个时刻才需要停掉全局热键，
+    # 否则「设置窗口开着就再也截不了图」。
+    recordingChanged = pyqtSignal(bool)
 
     def __init__(self, value: str = "", parent=None):
         super().__init__(parent)
@@ -107,16 +110,26 @@ class HotkeyEdit(QLineEdit):
         self._preview = ""
         self.setText(value or "点击此处后按下组合键")
 
+    def _set_recording(self, on: bool):
+        on = bool(on)
+        if self._recording == on:
+            return
+        self._recording = on
+        try:
+            self.recordingChanged.emit(on)
+        except Exception:
+            pass
+
     # ---------- 录制 ----------
     def begin_recording(self):
-        self._recording = True
+        self._set_recording(True)
         self._preview = ""
         self.setProperty("recording", "true")
         repolish(self)
         self.setText("请按下新的组合键…")
 
     def stop_recording(self):
-        self._recording = False
+        self._set_recording(False)
         self._preview = ""
         self.setProperty("recording", "false")
         repolish(self)
@@ -168,7 +181,7 @@ class HotkeyEdit(QLineEdit):
             return
 
         self._value = "%s+%s" % (mods_to_text(mods), name)
-        self._recording = False
+        self._set_recording(False)
         self.setProperty("recording", "false")
         repolish(self)
         self.setText(self._value)
@@ -187,6 +200,8 @@ class HotkeyEdit(QLineEdit):
 
 class SettingsDialog(QDialog):
     check_requested = pyqtSignal()
+    # 只有「正在录快捷键」这一刻为 True，外面据此临时停掉全局热键
+    hotkey_recording = pyqtSignal(bool)
 
     def __init__(self, cfg, try_apply_hotkey, parent=None, update_info=None,
                  probe_hotkey=None):
@@ -251,6 +266,7 @@ class SettingsDialog(QDialog):
         body = self._card("截图快捷键", root)
         self.hotkey_edit = HotkeyEdit(cfg.get("hotkey", ""))
         self.hotkey_edit.valueChanged.connect(self._on_hotkey_changed)
+        self.hotkey_edit.recordingChanged.connect(self.hotkey_recording.emit)
         body.addWidget(self.hotkey_edit)
         self.lbl_alt = QLabel("")
         self.lbl_alt.setStyleSheet("color: %s; font-size: 12px;" % theme.WARN)

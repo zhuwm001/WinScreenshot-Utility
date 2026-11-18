@@ -704,20 +704,23 @@ class AppController(QObject):
     # ------------------------------------------------------------ 设置
     def open_settings(self):
         original = config.get("hotkey")
-        # 录快捷键时先停掉触发，否则按下当前组合就会当场截图
-        self.hotkey.set_enabled(False)
         try:
             dlg = SettingsDialog(config, self._try_apply_hotkey, None,
                                  update_info=self._available_update,
                                  probe_hotkey=self._probe_hotkey)
             dlg.check_requested.connect(self._on_settings_check)
+            # 只在"正在录快捷键"的那一小段时间停掉热键。
+            # 以前是整个对话框生命周期都停，结果设置页开着就再也截不了图 ——
+            # 用户会以为程序坏了，而不是"被设置挡住了"。
+            dlg.hotkey_recording.connect(
+                lambda on: self.hotkey.set_enabled(not on))
             # 设置页开着的时候查到新版本，箭头和「上次检查」要能当场刷新
             self._settings_dlg = dlg
             accepted = dlg.exec_() == QDialog.Accepted
             wants_update = bool(getattr(dlg, "wants_update", False))
         finally:
             self._settings_dlg = None
-            self.hotkey.set_enabled(True)
+            self.hotkey.set_enabled(True)     # 对话框以任何方式关掉都恢复
         if accepted:
             self.win.set_hotkey_text(config.get("hotkey"))
             self._refresh_tray_menu()

@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """全屏截图遮罩层：框选区域、标注、复制、贴图。"""
 import math
+import time
 
 from PyQt5.QtCore import (
     QEvent, QMimeData, QObject, QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer,
@@ -60,6 +61,20 @@ def _rect_text(r) -> str:
     if r is None or r.isNull():
         return "无"
     return "%d,%d %d×%d" % (r.x(), r.y(), r.width(), r.height())
+
+
+def _who_called(skip: int = 2, depth: int = 4) -> str:
+    """谁调用了当前函数 —— 只留「函数名:行号」链。
+
+    截图被"莫名复制掉"时，日志里最缺的就是这一句：到底是谁按下了复制，
+    是用户点了按钮、盲按了快捷键，还是代码里某条路径自己走进了 _copy()。
+    """
+    import traceback
+    try:
+        frames = traceback.extract_stack()[:-skip][-depth:]
+        return " < ".join("%s:%d" % (f.name, f.lineno) for f in reversed(frames))
+    except Exception:
+        return "?"
 
 
 def _as_tool_window(w):
@@ -624,6 +639,7 @@ class CaptureOverlay(QWidget):
 
         self._bar_promoted = False      # 工具条已升级成独立窗口（合成失败时的兜底）
         self._bar_raster = None         # 最后一道兜底：把工具条画成图，由遮罩自己画
+        self._sel_done_ts = 0.0         # 框选定案的时刻（单调时钟），用来算存活了多久
         self._bar = EditorBar(self)
         self._bar.toolChanged.connect(self._on_tool_changed)
         self._bar.colorClicked.connect(self._pick_color)
@@ -1006,10 +1022,17 @@ class CaptureOverlay(QWidget):
             r = QRect(0, 0, self.width(), self.height())      # 单击 -> 全屏
         self._sel = r
         self._state = S_SELECTED
+        self._sel_done_ts = time.monotonic()
         self._show_bar()
         self.update()
         ulog("框选完成：选区=%d×%d 遮罩=%d×%d dpr=%.2f"
              % (r.width(), r.height(), self.width(), self.height(), self._dpr))
+
+    def _sel_age_ms(self) -> int:
+        """框选定案到现在过了多少毫秒；还没定案就返回 -1。"""
+        if not self._sel_done_ts:
+            return -1
+        return int((time.monotonic() - self._sel_done_ts) * 1000)
 
     def leaveEvent(self, event):
         super().leaveEvent(event)
@@ -1085,6 +1108,8 @@ class CaptureOverlay(QWidget):
             return
         if event.modifiers() & Qt.ControlModifier:
             if key == Qt.Key_C:
+                # 这条以前没有日志：盲按 Ctrl+C 和"程序自己复制"在日志里长得一模一样
+                ulog("快捷键完成：Ctrl+C")
                 self._copy()
                 return
             if key == Qt.Key_S:
@@ -1210,7 +1235,17 @@ class CaptureOverlay(QWidget):
         在 update.log 里留下一个亮度数字。
         """
         try:
-            if not self.isVisible() or self._sel.isNull() or not self._bar.isVisible():
+            # 这三个 return 以前是静默的：日志里只留下一片空白，
+            # 事后分不清是"自检没跑"还是"跑了但条件不满足"。
+            if not self.isVisible():
+                ulog("工具条自检跳过：遮罩已关闭（框选结束后 %d ms 就结束了）"
+                     % self._sel_age_ms())
+                return
+            if self._sel.isNull():
+                ulog("工具条自检跳过：选区为空")
+                return
+            if not self._bar.isVisible():
+                ulog("工具条自检跳过：工具条不可见（未显示或已被隐藏）")
                 return
             lum = self._probe_bar_luminance()
             if lum is None:
@@ -1778,6 +1813,10 @@ class CaptureOverlay(QWidget):
         return "?"
 
     def _copy(self):
+        # 这一行是定位「框选完立刻提示已复制」的关键：谁调用的、距框选多久。
+        ulog("复制触发：状态=%d 距框选=%d ms 工具条可见=%s 独立窗口=%s 来源=%s"
+             % (self._state, self._sel_age_ms(), self._bar.isVisible(),
+                self._bar_promoted, _who_called()))
         if self._text_edit is not None:
             self._commit_text()
         if self._sel.isNull():
