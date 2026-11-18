@@ -3,11 +3,12 @@
 import math
 
 from PyQt5.QtCore import (
-    QEvent, QObject, QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer, pyqtSignal,
+    QEvent, QMimeData, QObject, QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer,
+    QUrl, pyqtSignal,
 )
 from PyQt5.QtGui import (
     QColor, QFont, QFontMetrics, QImage, QPainter, QPainterPath, QPen, QPixmap,
-    QPolygonF, QTextCursor,
+    QPolygonF, QRegion, QTextCursor,
 )
 from PyQt5.QtWidgets import (
     QApplication, QFileDialog, QFrame, QHBoxLayout, QLabel, QTextEdit, QToolButton,
@@ -44,6 +45,9 @@ HANDLE_SIZE = 8
 DIM_COLOR = QColor(0, 0, 0, 115)
 SEL_BORDER = QColor(74, 134, 255, 255)
 
+# 工具条底色 #18181C 的亮度约 24；直接在屏幕上采样，低于这个数才算"真的画出来了"
+BAR_DARK_LUMA = 70
+
 # 文字字号范围（像素）
 FONT_MIN = 12
 FONT_MAX = 96
@@ -56,6 +60,18 @@ def _rect_text(r) -> str:
     if r is None or r.isNull():
         return "无"
     return "%d,%d %d×%d" % (r.x(), r.y(), r.width(), r.height())
+
+
+def _as_tool_window(w):
+    """把一个浮层改成独立顶层小窗（不抢焦点、不进任务栏、盖在遮罩上面）。"""
+    w.setParent(None)
+    w.setWindowFlags(Qt.Tool | Qt.FramelessWindowHint
+                     | Qt.WindowStaysOnTopHint
+                     | Qt.WindowDoesNotAcceptFocus
+                     | Qt.NoDropShadowWindowHint)
+    w.setAttribute(Qt.WA_ShowWithoutActivating, True)
+    w.setAttribute(Qt.WA_NoSystemBackground, True)
+    w._apply_mask()
 
 
 def _font(size: int, bold: bool = False) -> QFont:
@@ -253,19 +269,45 @@ def text_rect(item: AnnotItem) -> QRectF:
 
 # ------------------------------------------------------------------ 浮动工具栏
 class FloatingBar(QWidget):
-    """自绘圆角深色条的容器，圆角外透明。"""
+    """自绘圆角深色条的容器。
+
+    这里刻意不再用 WA_TranslucentBackground。该属性只对**顶层窗口**有保证，
+    加在**子控件**上属于未定义行为：多数机器照样合成得出来，个别机器（远程桌面、
+    DWM 合成被关、显卡驱动差异）会整块画不出来 —— 控件还在、点得到，屏幕上却
+    什么都没有。用户框选完只看到「选区还在、按钮没了」，只能瞎点，正好点到最右
+    边的「保存并复制」，于是什么也没做就成了，图被复制走、遮罩关闭。
+    改成「满幅不透明底色 + 圆角遮罩」，不依赖任何合成：画得出来就是画得出来。
+    """
+
+    CARD = QColor(24, 24, 28)          # 不透明底色（原来是 24,24,28,240）
+    EDGE = QColor(255, 255, 255, 34)
 
     def __init__(self, parent=None, radius=10):
         super().__init__(parent)
-        self.setAttribute(Qt.WA_TranslucentBackground, True)
-        self.setAttribute(Qt.WA_NoSystemBackground, True)
         self._radius = radius
+        self.setAttribute(Qt.WA_NoSystemBackground, True)
+        self.setAutoFillBackground(False)
+        self._apply_mask()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._apply_mask()
+
+    def _apply_mask(self):
+        r = self.rect()
+        if r.width() < 3 or r.height() < 3:
+            return
+        path = QPainterPath()
+        path.addRoundedRect(QRectF(r), self._radius, self._radius)
+        self.setMask(QRegion(path.toFillPolygon().toPolygon()))
 
     def paintEvent(self, event):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing, True)
-        p.setPen(QPen(QColor(255, 255, 255, 34), 1))
-        p.setBrush(QColor(24, 24, 28, 240))
+        # 整块铺满：父窗口即使没有重画这一片，我们自己也是不透明的
+        p.fillRect(self.rect(), self.CARD)
+        p.setPen(QPen(self.EDGE, 1))
+        p.setBrush(Qt.NoBrush)
         p.drawRoundedRect(QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5),
                           self._radius, self._radius)
 
@@ -529,6 +571,7 @@ class CaptureOverlay(QWidget):
     pinned = pyqtSignal(object, object)  # QImage, 屏幕坐标 QPoint
     cancelled = pyqtSignal()
     activated = pyqtSignal()           # 用户在这块遮罩上按了鼠标（多屏时用来清掉别的屏的选区）
+    copy_fallback = pyqtSignal(str)    # 剪贴板写不进去，已改存文件（参数是文件路径）
 
     def __init__(self, pen_color="#FF3B30", text_size=FONT_DEFAULT, text_bold=False,
                  shot=None, vgeo=None, show_hint=True):
@@ -579,12 +622,14 @@ class CaptureOverlay(QWidget):
         self._text_edge = ""
         self._text_edge_right = 0.0
 
+        self._bar_promoted = False      # 工具条已升级成独立窗口（合成失败时的兜底）
+        self._bar_raster = None         # 最后一道兜底：把工具条画成图，由遮罩自己画
         self._bar = EditorBar(self)
         self._bar.toolChanged.connect(self._on_tool_changed)
         self._bar.colorClicked.connect(self._pick_color)
         self._bar.undoClicked.connect(self._undo)
         self._bar.pinClicked.connect(self._pin)
-        self._bar.copyClicked.connect(self._copy)
+        self._bar.copyClicked.connect(self._on_bar_copy)
         self._bar.saveClicked.connect(self._save_file)
         self._bar.cancelClicked.connect(self._cancel)
         self._bar.textSizeChanged.connect(self._on_text_size)
@@ -592,6 +637,7 @@ class CaptureOverlay(QWidget):
         self._bar.set_text_style(self._text_size, self._text_bold)
         self._bar.hide()
 
+        self._palette_promoted = False
         self._palette = ColorPalette(self)
         self._palette.colorPicked.connect(self._on_palette_color)
         self._palette.customRequested.connect(self._pick_custom_color)
@@ -679,6 +725,12 @@ class CaptureOverlay(QWidget):
 
         if self._state in (S_SELECTED, S_RESIZING, S_DRAWING):
             self._draw_handles(p, sel)
+
+        # 兜底模式：工具条由遮罩自己画（子控件在这台机器上不显示时）
+        if self._bar_raster is not None:
+            r = self._bar_rect_overlay()
+            if not r.isNull():
+                p.drawPixmap(r.topLeft(), self._bar_raster)
 
         p.end()
 
@@ -1023,6 +1075,8 @@ class CaptureOverlay(QWidget):
             self._cancel()
             return
         if key in (Qt.Key_Return, Qt.Key_Enter):
+            ulog("回车完成：工具条可见=%s 独立窗口=%s"
+                 % (self._bar.isVisible(), self._bar_promoted))
             self._copy()
             return
         if key == Qt.Key_F3:
@@ -1093,32 +1147,140 @@ class CaptureOverlay(QWidget):
                 x = sel.right() + 1 - w
         x = max(6, min(x, self.width() - w - 6))
         y = max(6, min(y, self.height() - h - 6))
-        self._bar.move(int(x), int(y))
+        self._bar_move(x, y)
         self._bar.show()
         self._bar.raise_()
         self._bar.update()
-        # 自检要等窗口真正映射完成（立即查一定是空区域，会误判）
-        QTimer.singleShot(120, self._verify_bar)
+        if self._bar_raster is not None:
+            # 内嵌绘制模式：换工具/换位置后要重拍一张，否则显示的还是旧的
+            self._bar_raster = self._bar.grab()
+            self.update()
+        # 自检要等这一帧真正画完（立即查一定是空区域，会误判）
+        QTimer.singleShot(150, self._audit_bar)
 
-    def _verify_bar(self):
-        """工具条是遮罩的子控件，个别机器（高 DPI、多屏混合缩放、远程桌面）上
-        父窗口不会把它重画出来 —— 结果是"选区在、工具条不见"，用户完全没法标注。
-        发现没画出来就把工具条挪到选区左上角里侧，至少保证能点到。
+    def _bar_rect_overlay(self) -> QRect:
+        """工具条在遮罩坐标系里的位置（升级成独立窗口后要换算回来）。"""
+        if self._bar_promoted:
+            return QRect(self.mapFromGlobal(self._bar.pos()), self._bar.size())
+        return self._bar.geometry()
+
+    def _bar_move(self, x, y):
+        if self._bar_promoted:
+            self._bar.move(self.mapToGlobal(QPoint(int(x), int(y))))
+        else:
+            self._bar.move(int(x), int(y))
+
+    def _probe_bar_luminance(self):
+        """直接采屏幕像素，看工具条那一块是不是真的变暗了。
+
+        控件"存在且点得到"和"屏幕上看得见"是两回事：合成失败时它照样接收鼠标，
+        屏幕上看却什么都没有。只有采真实像素才能区分。取不到就返回 None。
         """
-        if not self.isVisible() or self._sel.isNull() or not self._bar.isVisible():
-            return
-        if not self._bar.visibleRegion().isEmpty():
-            return
-        sel = self._sel
-        w, h = self._bar.width(), self._bar.height()
-        x = max(0, min(sel.left() + 6, self.width() - w))
-        y = max(0, min(sel.top() + 6, self.height() - h))
-        self._bar.move(int(x), int(y))
+        geo = self._bar_rect_overlay()
+        inner = geo.adjusted(6, 6, -6, -6)
+        if inner.width() < 8 or inner.height() < 8:
+            return None
+        g = self.mapToGlobal(inner.topLeft())
+        screen = QApplication.screenAt(g) or QApplication.primaryScreen()
+        if screen is None:
+            return None
+        sg = screen.geometry()
+        shot = screen.grabWindow(0, g.x() - sg.x(), g.y() - sg.y(),
+                                 inner.width(), inner.height())
+        if shot is None or shot.isNull():
+            return None
+        img = shot.toImage()
+        if img.isNull():
+            return None
+        step = max(2, min(img.width(), img.height()) // 10)
+        total, n = 0, 0
+        for yy in range(1, img.height(), step):
+            for xx in range(1, img.width(), step):
+                c = img.pixelColor(xx, yy)
+                total += (c.red() * 299 + c.green() * 587 + c.blue() * 114) // 1000
+                n += 1
+        return (total / n) if n else None
+
+    def _audit_bar(self):
+        """确认工具条真的画在屏幕上了；没画出来就换成独立窗口再试一次。
+
+        以前这里只查 visibleRegion()，那只反映"有没有被裁剪"，跟"有没有被画出来"
+        无关 —— 恰恰漏掉了本次的真实故障。改成采像素后，无论哪种合成毛病都能
+        在 update.log 里留下一个亮度数字。
+        """
+        try:
+            if not self.isVisible() or self._sel.isNull() or not self._bar.isVisible():
+                return
+            lum = self._probe_bar_luminance()
+            if lum is None:
+                ulog("工具条自检跳过：取不到屏幕像素")
+                return
+            if lum <= BAR_DARK_LUMA:
+                ulog("工具条自检通过：选区=%s 工具条=%s 亮度=%.0f"
+                     % (_rect_text(self._sel), _rect_text(self._bar_rect_overlay()), lum))
+                return
+            if self._bar_promoted:
+                if self._bar_raster is None:
+                    self._enable_bar_raster()
+                    QTimer.singleShot(150, self._audit_bar)
+                    return
+                ulog("工具条三种方式都未绘制：亮度=%.0f 位置=%s"
+                     % (lum, _rect_text(self._bar_rect_overlay())))
+                return
+            ulog("工具条未绘制出来：亮度=%.0f（应≈24），改为独立窗口显示" % lum)
+            self._promote_bar()
+            QTimer.singleShot(150, self._audit_bar)
+        except Exception:
+            import traceback
+            ulog("工具条自检异常：" + traceback.format_exc(limit=6).replace("\n", " | "))
+
+    def _promote_bar(self):
+        """把工具条升级成独立顶层窗口：用自己的绘制表面，不再依赖遮罩的合成。"""
+        gpos = self.mapToGlobal(self._bar.geometry().topLeft())
+        _as_tool_window(self._bar)
+        self._bar.move(gpos)
         self._bar.show()
         self._bar.raise_()
-        self._bar.update()
-        ulog("工具栏未绘制出来，已回退到选区左上角：选区=%s 窗口=%dx%d 工具条=%dx%d"
-             % (_rect_text(sel), self.width(), self.height(), w, h))
+        self._bar_promoted = True
+        # 键盘（R/T/A/Esc/回车）必须继续留在遮罩上
+        self.activateWindow()
+        self.setFocus(Qt.ActiveWindowFocusReason)
+
+    def _promote_palette(self):
+        if self._palette_promoted:
+            return
+        self._palette_promoted = True
+        _as_tool_window(self._palette)
+
+    def _enable_bar_raster(self):
+        """最后一道兜底：把工具条整块渲染成图片，交给遮罩自己画。
+
+        遮罩本身的绘制是好的（暗化、边框、尺寸标签都在），所以只要工具条的像素
+        由遮罩来画，它就一定能出现。控件本身继续留着接收鼠标，只是看不见的那台
+        机器上由这张图顶上。
+        """
+        try:
+            self._bar_raster = self._bar.grab()
+            self.update()
+            ulog("工具条改用遮罩内嵌绘制：%s %dx%d"
+                 % (_rect_text(self._bar_rect_overlay()),
+                    self._bar_raster.width(), self._bar_raster.height()))
+        except Exception:
+            import traceback
+            ulog("工具条内嵌绘制失败：" + traceback.format_exc(limit=6).replace("\n", " | "))
+
+    def _drop_bar(self):
+        """遮罩关闭时收拾可能已经独立出去的窗口。"""
+        for w in (self._bar, self._palette):
+            if w.parent() is not None:
+                continue
+            try:
+                w.hide()
+                w.deleteLater()
+            except Exception:
+                pass
+        self._bar_promoted = False
+        self._palette_promoted = False
 
     def _on_tool_changed(self, kind):
         if kind != T_TEXT and self._text_edit is not None:
@@ -1141,14 +1303,19 @@ class CaptureOverlay(QWidget):
             self._palette.hide()
             return
         self._palette.adjustSize()
-        bar = self._bar
+        bar = self._bar_rect_overlay()
         pw, ph = self._palette.width(), self._palette.height()
         x = bar.x() + bar.width() - pw
         y = bar.y() - ph - 6
         if y < 6:
             y = bar.y() + bar.height() + 6
         x = max(6, min(x, self.width() - pw - 6))
-        self._palette.move(int(x), int(y))
+        if self._bar_promoted:
+            # 工具条都升级成独立窗口了，说明这台机器不画遮罩的子控件，色板同理
+            self._promote_palette()
+            self._palette.move(self.mapToGlobal(QPoint(int(x), int(y))))
+        else:
+            self._palette.move(int(x), int(y))
         self._palette.show()
         self._palette.raise_()
 
@@ -1458,6 +1625,87 @@ class CaptureOverlay(QWidget):
         p.end()
         return img
 
+    def _on_bar_copy(self):
+        # 和"回车"分开记：能直接看出用户是点了按钮，还是盲按了回车
+        ulog("点击工具条复制按钮：工具条可见=%s 独立窗口=%s"
+             % (self._bar.isVisible(), self._bar_promoted))
+        self._copy()
+
+    def _clipboard_summary(self) -> str:
+        try:
+            md = QApplication.clipboard().mimeData()
+        except Exception:
+            return "读取失败"
+        if md is None:
+            return "空"
+        fmts = ", ".join(sorted(md.formats())) or "空"
+        n = len(md.text()) if md.hasText() else 0
+        return "格式=[%s] 文本长度=%d" % (fmts, n)
+
+    def _dump_png(self, img) -> str:
+        """剪贴板彻底写不进去时的兜底：存成 PNG，至少图不会丢。"""
+        try:
+            import os
+            from datetime import datetime
+            from app_config import config_dir
+            d = os.path.join(config_dir(), "screenshots")
+            if not os.path.isdir(d):
+                os.makedirs(d, exist_ok=True)
+            path = os.path.join(d, "shot_%s.png"
+                                % datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3])
+            if img.save(path, "PNG"):
+                return path
+        except Exception:
+            import traceback
+            ulog("截图落盘异常：" + traceback.format_exc(limit=6).replace("\n", " | "))
+        return ""
+
+    def _put_image(self, img) -> str:
+        """把图放进剪贴板，**回读确认**真的进去了。成功返回 ""，失败返回落盘路径。
+
+        有的机器上剪贴板会被别的程序（剪贴板管理器、输入法、远程控制、安全软件）
+        短时间占着，setImage() 会静默失败：界面照样提示"已复制"，用户粘贴出来
+        却是上一次留下的旧内容（比如几个字）。这种事只能自己回读验证。
+        """
+        cb = QApplication.clipboard()
+        ulog("复制前剪贴板：" + self._clipboard_summary())
+        attempts = (
+            ("setImage", lambda: cb.setImage(img)),
+            ("setPixmap", lambda: cb.setPixmap(QPixmap.fromImage(img))),
+            ("setImage-again", lambda: cb.setImage(img)),
+        )
+        want = img.convertToFormat(QImage.Format_ARGB32)
+        for name, fn in attempts:
+            try:
+                fn()
+            except Exception:
+                ulog("写入剪贴板异常（%s）" % name)
+            back = cb.image()
+            ok = (not back.isNull() and back.size() == img.size()
+                  and back.convertToFormat(QImage.Format_ARGB32) == want)
+            if ok:
+                ulog("剪贴板回读一致（%s）：%d×%d" % (name, img.width(), img.height()))
+                ulog("复制后剪贴板：" + self._clipboard_summary())
+                return ""
+            ulog("剪贴板回读不一致（%s）：期望 %d×%d，实际 %s"
+                 % (name, img.width(), img.height(),
+                    "空" if back.isNull() else "%d×%d" % (back.width(), back.height())))
+            import time
+            QApplication.processEvents()
+            time.sleep(0.06)
+        path = self._dump_png(img)
+        if path:
+            md = QMimeData()
+            md.setUrls([QUrl.fromLocalFile(path)])
+            try:
+                cb.setMimeData(md)
+            except Exception:
+                pass
+            ulog("剪贴板写入失败，已改为存文件：%s" % path)
+            return path
+        ulog("剪贴板写入失败，且存文件也失败")
+        return "?"
+
     def _copy(self):
         if self._text_edit is not None:
             self._commit_text()
@@ -1466,9 +1714,12 @@ class CaptureOverlay(QWidget):
         img = self._export()
         if img.isNull():
             return
-        QApplication.clipboard().setImage(img)
+        note = self._put_image(img)
         self._bar.hide()
-        ulog("截图完成：已复制 %d×%d" % (img.width(), img.height()))
+        if note:
+            self.copy_fallback.emit(note)
+        else:
+            ulog("截图完成：已复制 %d×%d" % (img.width(), img.height()))
         self.finished.emit(img)
         self.close()
 
@@ -1476,6 +1727,7 @@ class CaptureOverlay(QWidget):
         # 遮罩自己消失（而不是走取消/复制/贴图）时，这条日志是唯一的线索
         ulog("遮罩关闭：状态=%s 选区=%s 窗口=%d×%d"
              % (self._state, _rect_text(self._sel), self.width(), self.height()))
+        self._drop_bar()
         super().closeEvent(event)
 
     def _save_file(self):
@@ -1539,6 +1791,7 @@ class CaptureSession(QObject):
     """
 
     finished = pyqtSignal(object)        # QImage
+    copy_fallback = pyqtSignal(str)      # 剪贴板写入失败，已存成文件
     pinned = pyqtSignal(object, object)  # QImage, QPoint
     cancelled = pyqtSignal()
     closed = pyqtSignal()
@@ -1576,6 +1829,7 @@ class CaptureSession(QObject):
     # ---------------------------------------------------------- 组装
     def _attach(self, ov: CaptureOverlay):
         ov.finished.connect(self._on_finished)
+        ov.copy_fallback.connect(self._on_copy_fallback)
         ov.pinned.connect(self._on_pinned)
         ov.cancelled.connect(self._on_cancelled)
         ov.activated.connect(lambda o=ov: self._on_activated(o))
@@ -1633,6 +1887,9 @@ class CaptureSession(QObject):
                 pass
         self._overlays = []
         self.closed.emit()
+
+    def _on_copy_fallback(self, path):
+        self.copy_fallback.emit(path)
 
     def _on_finished(self, image):
         # 先通知（主窗口要读一下字号/粗细），再关遮罩

@@ -157,6 +157,7 @@ class AppController(QObject):
         self._restore_main = False
         self.overlay = None
         self._capture_guard = False
+        self._copy_note = ""            # 剪贴板写不进去时的落盘路径（用于提示）
         self._hide_rect = QRect()
         self._checker = None
         self._update_dlg = None
@@ -345,6 +346,7 @@ class AppController(QObject):
 
     def _release_guard(self):
         self._capture_guard = False
+        self._copy_note = ""            # 剪贴板写不进去时的落盘路径（用于提示）
 
     def _open_overlay(self, desk=None):
         if desk is not None and not self._hide_rect.isNull():
@@ -356,6 +358,7 @@ class AppController(QObject):
                                       config.get("text_size"),
                                       config.get("text_bold"))
         self.overlay.finished.connect(self._on_capture_done)
+        self.overlay.copy_fallback.connect(self._on_copy_fallback)
         self.overlay.cancelled.connect(self._on_capture_cancelled)
         self.overlay.pinned.connect(self._on_pinned)
         self.overlay.closed.connect(self._on_overlay_destroyed)
@@ -364,12 +367,25 @@ class AppController(QObject):
     def _on_overlay_destroyed(self, *_):
         self.overlay = None
 
+    def _on_copy_fallback(self, path):
+        # 剪贴板被别的程序占着、写不进去时改存文件；这里把路径记下来给提示用
+        self._copy_note = path
+
     def _on_capture_done(self, image):
         self._persist_text_style()
         self.overlay = None
         self._restore_main_window()
-        Toast.show_toast("已复制到剪贴板", "可在其他窗口中按 Ctrl+V 粘贴。",
-                         kind="check", timeout=3000)
+        note = getattr(self, "_copy_note", "")
+        self._copy_note = ""
+        if note and note != "?":
+            Toast.show_toast("已存为图片文件", "剪贴板被其他程序占用，图片保存在 %s" % note,
+                             kind="info", timeout=6000)
+        elif note == "?":
+            Toast.show_toast("复制失败", "剪贴板被其他程序占用，图片也未能保存。",
+                             kind="info", timeout=6000)
+        else:
+            Toast.show_toast("已复制到剪贴板", "可在其他窗口中按 Ctrl+V 粘贴。",
+                             kind="check", timeout=3000)
 
     def _on_capture_cancelled(self):
         self._persist_text_style()
