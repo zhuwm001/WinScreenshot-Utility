@@ -17,7 +17,7 @@ from PyQt5.QtWidgets import (
 
 import icons
 from screenshot import (capture_desktop, grab_virtual_desktop, virtual_geometry)
-from update_log import log as ulog
+from update_log import SHOT_KEEP, log as ulog, prune_shots, shots_dir
 from winutil import force_foreground
 
 # 状态
@@ -1708,17 +1708,23 @@ class CaptureOverlay(QWidget):
         return "格式=[%s] 文本长度=%d" % (fmts, n)
 
     def _dump_png(self, img) -> str:
-        """剪贴板彻底写不进去时的兜底：存成 PNG，至少图不会丢。"""
+        """剪贴板彻底写不进去时的兜底：存成 PNG，至少图不会丢。
+
+        存完顺手清理：这类图是救急用的，用户拿走就没意义了，不设上限会一直
+        攒（一张 1–3MB）。只留最近 SHOT_KEEP 张、总量不超过 SHOT_MAX_BYTES。
+        """
         try:
             import os
             from datetime import datetime
-            from app_config import config_dir
-            d = os.path.join(config_dir(), "screenshots")
+            d = shots_dir()
             if not os.path.isdir(d):
                 os.makedirs(d, exist_ok=True)
             path = os.path.join(d, "shot_%s.png"
                                 % datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3])
             if img.save(path, "PNG"):
+                dropped = prune_shots()
+                if dropped:
+                    ulog("兜底截图已清理 %d 张（只留最近 %d 张）" % (dropped, SHOT_KEEP))
                 return path
         except Exception:
             import traceback

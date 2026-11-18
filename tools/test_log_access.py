@@ -72,7 +72,36 @@ import re
 m = re.search(r"屏=(\d+)", env)
 check(bool(m) and int(m.group(1)) >= 1, "屏数至少 1", m.group(0) if m else "?")
 
-print("5) 环境行不因缺屏信息而抛异常（拿不到屏幕时只跳过）")
+print("5) 兜底截图不会越攒越多：只留最近 20 张，超出从最旧的删")
+shots = update_log.shots_dir()
+os.makedirs(shots, exist_ok=True)
+for i in range(25):
+    p = os.path.join(shots, "shot_%02d.png" % i)
+    with open(p, "wb") as f:
+        f.write(b"\x89PNG\r\n\x1a\n" + bytes([i]) * 512)
+    os.utime(p, (1000 + i, 1000 + i))          # 制造先后顺序
+dropped = update_log.prune_shots()
+left = sorted(os.listdir(shots))
+check(dropped == 5, "删掉了最旧的 5 张", "dropped=%d" % dropped)
+check(len(left) == update_log.SHOT_KEEP, "剩 20 张", "left=%d" % len(left))
+check(left[0] == "shot_05.png" and left[-1] == "shot_24.png", "留下的是最新的 20 张")
+
+print("6) 总量上限也生效（与张数上限取先到的）")
+dropped = update_log.prune_shots(keep=100, max_bytes=2 * 1024)
+check(dropped >= 10, "体积超限时按大小裁（520B/张，2KB 只够留 3 张）", "dropped=%d" % dropped)
+total = sum(os.path.getsize(os.path.join(shots, n)) for n in os.listdir(shots))
+check(total <= 2 * 1024, "裁后总量不超上限", "%d 字节" % total)
+
+print("7) 占用统计：日志与兜底图都算进去")
+update_log.log("再来一行")
+u = update_log.usage()
+check(u["log"] > 0, "update.log 计入")
+check(u["shots"] > 0 and u["shot_count"] > 0, "兜底图计入")
+txt = update_log.usage_text()
+check("MB" in txt or "KB" in txt, "占用文案带单位", txt)
+check("张" in txt, "给出张数", txt)
+
+print("8) 环境行不因缺屏信息而抛异常（拿不到屏幕时只跳过）")
 class _Boom(object):
     pass
 try:

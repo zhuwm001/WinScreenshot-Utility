@@ -306,16 +306,6 @@ class SettingsDialog(QDialog):
         self.btn_check.setFocusPolicy(Qt.NoFocus)
         self.btn_check.clicked.connect(self._request_check)
         row.addWidget(self.btn_check)
-        row.addSpacing(10)
-
-        # 查不出东西的时候，日志比界面有用：每一步都记着，点一下就能看
-        self.btn_log = QPushButton("查看日志", self)
-        self.btn_log.setObjectName("linkBtn")
-        self.btn_log.setCursor(Qt.PointingHandCursor)
-        self.btn_log.setFocusPolicy(Qt.NoFocus)
-        self.btn_log.setToolTip("打开更新检查日志")
-        self.btn_log.clicked.connect(self._open_log)
-        row.addWidget(self.btn_log)
         body.addLayout(row)
 
         # 「自动检查更新」单独一行：挤在上面那一行时，窗口略窄就会被压扁甚至
@@ -330,13 +320,34 @@ class SettingsDialog(QDialog):
         body.addLayout(chk_row)
         body.addWidget(self._hint("软件每次启动时检查一次，常驻托盘期间每 12 小时检查一次。"
                                  "检测到新版本后会在界面中提示，点击「立即更新」可自动下载、"
-                                 "静默安装并重新启动。检查失败时可点击「查看日志」查看原因。"))
+                                 "静默安装并重新启动。检查失败时可在「诊断与日志」中查看原因。"))
         # 让「到底有没有在查、查出什么」都看得见 —— 怀疑没提示时先看这一行
         self.lbl_last = self._hint(self._last_check_text(cfg))
         body.addWidget(self.lbl_last)
 
         if update_info is not None:
             self._show_update_badge(update_info)
+
+        # ---------------- 诊断与日志 ----------------
+        # 日志早就不只记更新了：截图会话、工具条兜底、剪贴板回读、崩溃栈都在里面，
+        # 挂在「版本与更新」下面会让人以为只有更新的事才需要它。
+        body = self._card("诊断与日志", root)
+        body.addWidget(self._hint("记录程序运行、更新检查与截图的全过程。"
+                                 "截图后工具条不显示、粘贴出来是旧内容、程序异常退出，"
+                                 "都能从这里找到线索。"))
+        log_row = QHBoxLayout()
+        log_row.setSpacing(10)
+        self.btn_log = QPushButton("打开日志目录", self)
+        self.btn_log.setCursor(Qt.PointingHandCursor)
+        self.btn_log.setFocusPolicy(Qt.NoFocus)
+        self.btn_log.clicked.connect(self._open_log)
+        log_row.addWidget(self.btn_log)
+        self.lbl_log_usage = QLabel(update_log.usage_text(), self)
+        self.lbl_log_usage.setStyleSheet("color: %s; font-size: 12px;" % theme.TEXT_SUB)
+        log_row.addWidget(self.lbl_log_usage)
+        log_row.addStretch(1)
+        body.addLayout(log_row)
+        self._refresh_usage()
 
         root.addStretch(1)
 
@@ -446,6 +457,20 @@ class SettingsDialog(QDialog):
         self.set_checking(True)
         self.check_requested.emit()
 
+    def _refresh_usage(self):
+        """占用写在小字里：日志会一直写，用户有权知道它有多大、有没有上限。"""
+        try:
+            u = update_log.usage()
+            self.lbl_log_usage.setText(update_log.usage_text())
+            self.lbl_log_usage.setToolTip(
+                "运行日志 %.0f KB\n崩溃记录 %.0f KB\n兜底截图 %.0f KB（%d 张）\n"
+                "日志只保留最近 240 行；兜底截图只留最近 %d 张、最多 %d MB。"
+                % (u["log"] / 1024.0, u["crash"] / 1024.0,
+                   u["shots"] / 1024.0, u["shot_count"],
+                   update_log.SHOT_KEEP, update_log.SHOT_MAX_BYTES // (1024 * 1024)))
+        except Exception:
+            pass
+
     def _open_log(self):
         """打开日志目录并选中日志文件。
 
@@ -469,6 +494,7 @@ class SettingsDialog(QDialog):
         except Exception as e:
             QMessageBox.warning(self, "打不开日志",
                                 "请手动打开这个目录：\n%s\n\n%s" % (folder, e))
+        self._refresh_usage()
 
     def set_checking(self, on: bool):
         self._checking = bool(on)
