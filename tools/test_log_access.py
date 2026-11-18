@@ -112,6 +112,24 @@ except Exception as e:                       # noqa: BLE001
     print("     ", e)
 check(ok, "重复调用不抛异常")
 
+print("9) 历史日志整份都是 0x00：改名留证，另起一份能读的（不然发过来一个字都没有）")
+_broken = update_log.log_path()
+with open(_broken, "wb") as f:
+    f.write(b"\x00" * 3000)
+update_log._BROKEN_CHECKED = False               # 模拟"进程刚启动，第一次写日志"
+update_log.log("重建后的第一行")
+_tail = [l for l in update_log.read(60) if "重建后的第一行" in l]
+check(len(_tail) == 1, "新日志里能读到刚写的那行")
+check(os.path.exists(_broken + ".broken"), "坏日志被改名留证，没有直接删掉")
+with open(_broken, "rb") as f:
+    raw = f.read()
+check(raw.count(0) == 0, "新文件里没有空字节", "%d 个 0x00" % raw.count(0))
+check("空字节" in raw.decode("utf-8", errors="replace"), "重建时补了一条说明")
+
+print("10) durable 行照样写、照样读（只多了落盘）")
+update_log.log("这条要落盘", durable=True)
+check(any("这条要落盘" in l for l in update_log.read(60)), "durable=True 正常写入")
+
 print()
 if FAILED:
     print("失败 %d 项：%s" % (len(FAILED), "；".join(FAILED)))

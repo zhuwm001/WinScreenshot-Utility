@@ -77,6 +77,46 @@ class _KBDLLHOOKSTRUCT(ctypes.Structure):
 
 _HOOKPROC = ctypes.WINFUNCTYPE(_LRESULT, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM)
 
+# ---------------------------------------------------------------- 注入按键留痕
+# 有的机器上，别的程序（划词翻译、剪贴板工具、键鼠宏、驱动）会在用户拖完选区后
+# 自己塞一个 Ctrl+C 进前台窗口。遮罩收到就跟用户真的按了一样，截图当场被复制关闭，
+# 于是表现成"工具条一闪就没了"。低级钩子能拿到 LLKHF_INJECTED 标志，
+# 这里把"注入的按键"记下来，遮罩据此判断这一下该不该理。
+LLKHF_INJECTED = 0x10
+
+_INJECTED_KEYS = []          # [(monotonic 时刻, vkCode)]
+_INJECTED_KEEP = 0.8         # 只留最近 0.8 秒，够覆盖事件排队
+
+
+def _note_injected(vk: int):
+    now = time.monotonic()
+    _INJECTED_KEYS.append((now, int(vk)))
+    while _INJECTED_KEYS and now - _INJECTED_KEYS[0][0] > _INJECTED_KEEP:
+        _INJECTED_KEYS.pop(0)
+
+
+def was_injected(vk: int, window: float = 0.35) -> bool:
+    """最近 window 秒内有没有一条"别的程序注入"的 vk 按键。"""
+    if not _INJECTED_KEYS:
+        return False
+    now = time.monotonic()
+    for ts, k in reversed(_INJECTED_KEYS):
+        if now - ts > window:
+            break
+        if k == int(vk):
+            return True
+    return False
+
+
+def injected_count() -> int:
+    """当前缓存里有多少条注入记录（测试用）。"""
+    return len(_INJECTED_KEYS)
+
+
+def clear_injected():
+    _INJECTED_KEYS[:] = []
+
+
 # ---------------------------------------------------------------- 键名映射
 MODIFIER_ALIASES = {
     "CTRL": MOD_CONTROL, "CONTROL": MOD_CONTROL,
@@ -278,6 +318,9 @@ class _KeyboardHook(QObject):
         try:
             kb = ctypes.cast(l_param, ctypes.POINTER(_KBDLLHOOKSTRUCT)).contents
             vk = int(kb.vkCode)
+            # 先留痕：注入的按键不论是不是我们的热键，都要能被遮罩那边查到
+            if kb.flags & LLKHF_INJECTED:
+                _note_injected(vk)
 
             if w_param in (WM_KEYDOWN, WM_SYSKEYDOWN):
                 if self._holding and vk == self._vk:

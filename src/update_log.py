@@ -64,17 +64,72 @@ def _trim(path: str):
         pass
 
 
-def log(message: str):
-    """写一行带时间戳的日志（同一个时间点连写多行也没问题）。"""
+# 见过一次现场：update.log 一万多字节，内容全是 0x00 —— 长度在、数据没落到盘上，
+# 发回来一个字都读不出。那种文件继续往里追加也没意义（前面全是空洞），所以
+# 进程第一次写日志时检查一次：整份都是 0x00 就改名留证，另起一份能读的。
+_BROKEN_CHECKED = False
+
+
+def _recover_broken_log() -> str:
+    """检查一次历史日志是否损坏。返回要补记的说明，没坏就返回空串。"""
+    global _BROKEN_CHECKED
+    if _BROKEN_CHECKED:
+        return ""
+    _BROKEN_CHECKED = True
     try:
         path = log_path()
-        is_new = not os.path.exists(path)
+        size = os.path.getsize(path)
+    except Exception:
+        return ""
+    if size < 64:
+        return ""
+    try:
+        with open(path, "rb") as f:
+            head = f.read(min(size, 4096))
+    except Exception:
+        return ""
+    if not head or head.count(0) / float(len(head)) < 0.9:
+        return ""
+    try:
+        os.replace(path, path + ".broken")
+    except Exception:
+        try:
+            os.remove(path)
+        except Exception:
+            return ""
+    return "上次日志内容异常（整份都是空字节），已另存为 %s.broken" % os.path.basename(path)
+
+
+def _append(text: str, durable: bool):
+    path = log_path()
+    is_new = not os.path.exists(path)
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(text)
+        f.flush()
+        if durable:
+            # 关键证据行落到盘上：断电、蓝屏、被强杀之后还能读到。
+            # 普通行只 flush 到系统缓存就够了 —— 单次 fsync 约 7 ms，每行都做会拖慢界面。
+            try:
+                os.fsync(f.fileno())
+            except Exception:
+                pass
+    if is_new or os.path.getsize(path) > MAX_BYTES:
+        _trim(path)
+
+
+def log(message: str, durable: bool = False):
+    """写一行带时间戳的日志（同一个时间点连写多行也没问题）。
+
+    durable=True 用于"事后一定要读到"的那几行（复制前后剪贴板状态、拦截记录），
+    其余走普通 flush：正常关进程不会丢，只有断电这类才会。
+    """
+    try:
+        note = _recover_broken_log()
         stamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        line = "%s  %s\n" % (stamp, str(message).replace("\n", " "))
-        with open(path, "a", encoding="utf-8") as f:
-            f.write(line)
-        if is_new or os.path.getsize(path) > MAX_BYTES:
-            _trim(path)
+        text = "%s  %s\n" % (stamp, str(message).replace("\n", " "))
+        if note:
+            text = "%s  %s\n%s" % (stamp, note, text)
+        _append(text, durable)
     except Exception:
         pass
 

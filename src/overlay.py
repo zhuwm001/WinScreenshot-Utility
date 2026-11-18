@@ -49,6 +49,20 @@ SEL_BORDER = QColor(74, 134, 255, 255)
 # 工具条底色 #18181C 的亮度约 24；直接在屏幕上采样，低于这个数才算"真的画出来了"
 BAR_DARK_LUMA = 70
 
+# 框选刚定案的头 300ms 内，"完成/复制"类操作先不接受。
+# 人手做不到这么快；会这么干的只有别的程序塞进来的 Ctrl+C / 回车。
+# 拦一下只是让这一下失效，遮罩和工具条照常留着，用户再按一次就好。
+COPY_GUARD_MS = 300
+
+# Qt 键 -> Windows 虚拟键码：用来查这一下按键是不是别的程序注入的
+_VK_OF_KEY = {
+    Qt.Key_C: 0x43,
+    Qt.Key_Return: 0x0D,
+    Qt.Key_Enter: 0x0D,
+    Qt.Key_Escape: 0x1B,
+    Qt.Key_S: 0x53,
+}
+
 # 文字字号范围（像素）
 FONT_MIN = 12
 FONT_MAX = 96
@@ -1034,6 +1048,32 @@ class CaptureOverlay(QWidget):
             return -1
         return int((time.monotonic() - self._sel_done_ts) * 1000)
 
+    def _guard_action(self, key, label, check_time: bool = True) -> bool:
+        """这一下「完成 / 复制 / 取消」该不该理。
+
+        两道关：
+          1. 来源 —— 是不是别的程序用 SendInput 灌进来的（低级钩子带 LLKHF_INJECTED）
+          2. 时机 —— 框选刚定案的头 300ms，人手按不了这么快
+        命中就返回 True，调用方直接放弃，遮罩和工具条原地不动，用户再操作一次即可。
+        """
+        injected = False
+        vk = _VK_OF_KEY.get(key)
+        if vk is not None:
+            try:
+                from hotkey import was_injected
+                injected = was_injected(vk)
+            except Exception:
+                injected = False
+        age = self._sel_age_ms()
+        too_early = check_time and 0 <= age < COPY_GUARD_MS
+        if injected or too_early:
+            ulog("忽略%s：%s，距框选=%d ms（遮罩保持打开）"
+                 % (label,
+                    "按键是别的程序注入的" if injected else "框选刚结束",
+                    age), durable=True)
+            return True
+        return False
+
     def leaveEvent(self, event):
         super().leaveEvent(event)
         # 触摸板、远程桌面、鼠标被别的窗口抢走时 release 可能收不到，
@@ -1096,9 +1136,14 @@ class CaptureOverlay(QWidget):
             return
 
         if key == Qt.Key_Escape:
+            # 取消只管"是不是注入的"：用户拖错了想立刻撤销，不能拦
+            if self._guard_action(key, "Esc 取消", check_time=False):
+                return
             self._cancel()
             return
         if key in (Qt.Key_Return, Qt.Key_Enter):
+            if self._guard_action(key, "回车"):
+                return
             ulog("回车完成：工具条可见=%s 独立窗口=%s"
                  % (self._bar.isVisible(), self._bar_promoted))
             self._copy()
@@ -1108,6 +1153,8 @@ class CaptureOverlay(QWidget):
             return
         if event.modifiers() & Qt.ControlModifier:
             if key == Qt.Key_C:
+                if self._guard_action(key, "Ctrl+C"):
+                    return
                 # 这条以前没有日志：盲按 Ctrl+C 和"程序自己复制"在日志里长得一模一样
                 ulog("快捷键完成：Ctrl+C")
                 self._copy()
@@ -1774,7 +1821,7 @@ class CaptureOverlay(QWidget):
         却是上一次留下的旧内容（比如几个字）。这种事只能自己回读验证。
         """
         cb = QApplication.clipboard()
-        ulog("复制前剪贴板：" + self._clipboard_summary())
+        ulog("复制前剪贴板：" + self._clipboard_summary(), durable=True)
         attempts = (
             ("setImage", lambda: cb.setImage(img)),
             ("setPixmap", lambda: cb.setPixmap(QPixmap.fromImage(img))),
@@ -1791,11 +1838,12 @@ class CaptureOverlay(QWidget):
                   and back.convertToFormat(QImage.Format_ARGB32) == want)
             if ok:
                 ulog("剪贴板回读一致（%s）：%d×%d" % (name, img.width(), img.height()))
-                ulog("复制后剪贴板：" + self._clipboard_summary())
+                ulog("复制后剪贴板：" + self._clipboard_summary(), durable=True)
                 return ""
             ulog("剪贴板回读不一致（%s）：期望 %d×%d，实际 %s"
                  % (name, img.width(), img.height(),
-                    "空" if back.isNull() else "%d×%d" % (back.width(), back.height())))
+                    "空" if back.isNull() else "%d×%d" % (back.width(), back.height())),
+                 durable=True)
             import time
             QApplication.processEvents()
             time.sleep(0.06)
@@ -1807,9 +1855,9 @@ class CaptureOverlay(QWidget):
                 cb.setMimeData(md)
             except Exception:
                 pass
-            ulog("剪贴板写入失败，已改为存文件：%s" % path)
+            ulog("剪贴板写入失败，已改为存文件：%s" % path, durable=True)
             return path
-        ulog("剪贴板写入失败，且存文件也失败")
+        ulog("剪贴板写入失败，且存文件也失败", durable=True)
         return "?"
 
     def _copy(self):
