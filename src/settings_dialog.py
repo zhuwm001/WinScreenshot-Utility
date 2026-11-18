@@ -332,9 +332,9 @@ class SettingsDialog(QDialog):
         # 日志早就不只记更新了：截图会话、工具条兜底、剪贴板回读、崩溃栈都在里面，
         # 挂在「版本与更新」下面会让人以为只有更新的事才需要它。
         body = self._card("诊断与日志", root)
-        body.addWidget(self._hint("记录程序运行、更新检查与截图的全过程。"
-                                 "截图后工具条不显示、粘贴出来是旧内容、程序异常退出，"
-                                 "都能从这里找到线索。"))
+        body.addWidget(self._hint("记录程序功能异常、更新检查等过程。"
+                                 "点击「打开日志目录」可查看日志文件，或在遇到问题时将日志文件提交给开发者。"
+                                 ))
         log_row = QHBoxLayout()
         log_row.setSpacing(10)
         self.btn_log = QPushButton("打开日志目录", self)
