@@ -7,6 +7,11 @@ import sys
 import time
 from ctypes import wintypes
 
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
+import qt_env  # noqa: E402  Qt 平台插件路径统一处理，避免弹 no Qt platform plugin
+
+qt_env.setup()
+
 from PyQt5.QtGui import QGuiApplication
 
 user32 = ctypes.WinDLL("user32", use_last_error=True)

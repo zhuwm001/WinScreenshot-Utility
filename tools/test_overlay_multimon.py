@@ -20,6 +20,9 @@ import sys
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "src"))
 
+import qt_env  # noqa: E402  Qt 平台插件路径统一处理，避免弹 no Qt platform plugin
+qt_env.setup()
+
 from PyQt5.QtCore import QPoint, QRect, QRectF, Qt              # noqa: E402
 from PyQt5.QtGui import (QColor, QFont, QImage, QPainter, QPen,  # noqa: E402
                          QPixmap)

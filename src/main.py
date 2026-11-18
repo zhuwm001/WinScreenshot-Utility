@@ -4,6 +4,10 @@ import os
 import sys
 import time
 
+import qt_env  # 必须早于 PyQt5：先把 Qt 平台插件目录指好，否则会弹 no Qt platform plugin
+
+qt_env.setup()
+
 from PyQt5.QtCore import QObject, QRect, Qt, QTimer
 from PyQt5.QtGui import QColor, QIcon
 from PyQt5.QtNetwork import QLocalServer, QLocalSocket

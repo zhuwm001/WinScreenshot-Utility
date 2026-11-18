@@ -13,6 +13,9 @@ import tempfile
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(HERE), "src"))
 
+import qt_env  # noqa: E402  Qt 平台插件路径统一处理，避免弹 no Qt platform plugin
+qt_env.setup()
+
 import update as up  # noqa: E402
 
 PASS = FAIL = 0

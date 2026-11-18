@@ -17,6 +17,9 @@ import tempfile
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "src"))
 
+import qt_env  # noqa: E402  Qt 平台插件路径统一处理，避免弹 no Qt platform plugin
+qt_env.setup()
+
 # 必须在 import app_config 之前落定：config 是模块级单例，路径在导入时确定
 _tmp = tempfile.mkdtemp(prefix="woaijietu_diag_")
 os.environ["APPDATA"] = _tmp

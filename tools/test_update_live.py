@@ -16,6 +16,8 @@ import time
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "src"))
 
+import qt_env  # noqa: E402  Qt 平台插件路径统一处理，避免弹 no Qt platform plugin
+qt_env.setup()
 
 def _preload_openssl():
     """源码里跑时先把 OpenSSL 两个库载进进程。
