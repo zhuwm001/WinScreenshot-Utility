@@ -16,6 +16,7 @@ from PyQt5.QtWidgets import (
 
 import icons
 from screenshot import (capture_desktop, grab_virtual_desktop, virtual_geometry)
+from update_log import log as ulog
 from winutil import force_foreground
 
 # 状态
@@ -48,6 +49,13 @@ FONT_MIN = 12
 FONT_MAX = 96
 FONT_STEP = 2
 FONT_DEFAULT = 20
+
+
+def _rect_text(r) -> str:
+    """日志里用的矩形写法，比 QRect 的 repr 短得多。"""
+    if r is None or r.isNull():
+        return "无"
+    return "%d,%d %d×%d" % (r.x(), r.y(), r.width(), r.height())
 
 
 def _font(size: int, bold: bool = False) -> QFont:
@@ -589,6 +597,10 @@ class CaptureOverlay(QWidget):
         self._palette.customRequested.connect(self._pick_custom_color)
         self._palette.hide()
 
+        ulog("遮罩就绪：几何=%s 截图=%dx%d dpr=%.2f 实际窗口=%d×%d"
+             % (_rect_text(self._vgeo), self._shot.width(), self._shot.height(),
+                self._dpr, self.width(), self.height()))
+
     # ---------------------------------------------------------- 生命周期
     def show_overlay(self):
         self.show()
@@ -609,6 +621,15 @@ class CaptureOverlay(QWidget):
 
     # ---------------------------------------------------------- 绘制
     def paintEvent(self, event):
+        # 绘制里任何一个异常在 PyQt5 下都会直接 abort 进程（打包后无控制台，
+        # 表现为遮罩连同整个程序瞬间消失）。这里兜住并记日志，至少能保住会话。
+        try:
+            self._paint(event)
+        except Exception:
+            import traceback
+            ulog("遮罩绘制异常：" + traceback.format_exc(limit=8).replace("\n", " | "))
+
+    def _paint(self, event):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing, True)
         p.setRenderHint(QPainter.SmoothPixmapTransform, True)
@@ -887,15 +908,7 @@ class CaptureOverlay(QWidget):
             return
 
         if self._state == S_SELECTING:
-            r = QRect(self._origin, pos).normalized()
-            if r.width() < 6 or r.height() < 6:
-                # 单击 -> 全屏
-                self._sel = QRect(0, 0, self.width(), self.height())
-            else:
-                self._sel = r
-            self._state = S_SELECTED
-            self._show_bar()
-            self.update()
+            self._finish_selection(pos)
             return
 
         if self._state == S_DRAWING:
@@ -926,6 +939,32 @@ class CaptureOverlay(QWidget):
             self._resize_handle = ""
             self._show_bar()
             self.update()
+
+    def _finish_selection(self, pos=None):
+        """把"正在拖"的选区定下来并弹出工具条。
+
+        松手和"松手事件丢失"两条路都走这里，保证不会停在既没有手柄、
+        也没有工具条的中间状态。
+        """
+        if pos is None:
+            pos = QPoint(self._sel.right(), self._sel.bottom())
+        r = QRect(self._origin, pos).normalized()
+        if r.width() < 6 or r.height() < 6:
+            r = QRect(0, 0, self.width(), self.height())      # 单击 -> 全屏
+        self._sel = r
+        self._state = S_SELECTED
+        self._show_bar()
+        self.update()
+        ulog("框选完成：选区=%d×%d 遮罩=%d×%d dpr=%.2f"
+             % (r.width(), r.height(), self.width(), self.height(), self._dpr))
+
+    def leaveEvent(self, event):
+        super().leaveEvent(event)
+        # 触摸板、远程桌面、鼠标被别的窗口抢走时 release 可能收不到，
+        # 遮罩会卡在"拖拽中"：选区在、没有手柄也没有工具条，用户只能重来。
+        # 一旦发现按键其实已经放开，就当场把选区定下来。
+        if self._state == S_SELECTING and not (QApplication.mouseButtons() & Qt.LeftButton):
+            self._finish_selection()
 
     def _apply_resize(self, pos: QPoint):
         r = QRect(self._sel_before)
@@ -1033,6 +1072,13 @@ class CaptureOverlay(QWidget):
         if self._sel.isNull():
             self._bar.hide()
             return
+        try:
+            self._place_bar()
+        except Exception:
+            import traceback
+            ulog("工具栏显示异常：" + traceback.format_exc(limit=8).replace("\n", " | "))
+
+    def _place_bar(self):
         self._bar.fit()
         w, h = self._bar.width(), self._bar.height()
         gap = 10
@@ -1050,6 +1096,29 @@ class CaptureOverlay(QWidget):
         self._bar.move(int(x), int(y))
         self._bar.show()
         self._bar.raise_()
+        self._bar.update()
+        # 自检要等窗口真正映射完成（立即查一定是空区域，会误判）
+        QTimer.singleShot(120, self._verify_bar)
+
+    def _verify_bar(self):
+        """工具条是遮罩的子控件，个别机器（高 DPI、多屏混合缩放、远程桌面）上
+        父窗口不会把它重画出来 —— 结果是"选区在、工具条不见"，用户完全没法标注。
+        发现没画出来就把工具条挪到选区左上角里侧，至少保证能点到。
+        """
+        if not self.isVisible() or self._sel.isNull() or not self._bar.isVisible():
+            return
+        if not self._bar.visibleRegion().isEmpty():
+            return
+        sel = self._sel
+        w, h = self._bar.width(), self._bar.height()
+        x = max(0, min(sel.left() + 6, self.width() - w))
+        y = max(0, min(sel.top() + 6, self.height() - h))
+        self._bar.move(int(x), int(y))
+        self._bar.show()
+        self._bar.raise_()
+        self._bar.update()
+        ulog("工具栏未绘制出来，已回退到选区左上角：选区=%s 窗口=%dx%d 工具条=%dx%d"
+             % (_rect_text(sel), self.width(), self.height(), w, h))
 
     def _on_tool_changed(self, kind):
         if kind != T_TEXT and self._text_edit is not None:
@@ -1356,6 +1425,7 @@ class CaptureOverlay(QWidget):
         self.update()
 
     def _cancel(self):
+        ulog("截图取消：状态=%s 选区=%s" % (self._state, _rect_text(self._sel)))
         if self._text_edit is not None:
             edit = self._text_edit
             self._text_edit = None
@@ -1398,8 +1468,15 @@ class CaptureOverlay(QWidget):
             return
         QApplication.clipboard().setImage(img)
         self._bar.hide()
+        ulog("截图完成：已复制 %d×%d" % (img.width(), img.height()))
         self.finished.emit(img)
         self.close()
+
+    def closeEvent(self, event):
+        # 遮罩自己消失（而不是走取消/复制/贴图）时，这条日志是唯一的线索
+        ulog("遮罩关闭：状态=%s 选区=%s 窗口=%d×%d"
+             % (self._state, _rect_text(self._sel), self.width(), self.height()))
+        super().closeEvent(event)
 
     def _save_file(self):
         if self._text_edit is not None:

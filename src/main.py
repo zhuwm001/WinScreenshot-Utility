@@ -11,7 +11,7 @@ from PyQt5.QtWidgets import QApplication, QDialog, QMenu, QMessageBox, QSystemTr
 
 import theme
 import autostart
-from app_config import APP_NAME, APP_VERSION, as_bool, config
+from app_config import APP_NAME, APP_VERSION, as_bool, config, config_dir
 from hotkey import HotkeyManager, normalize_sequence
 from main_window import MainWindow
 from overlay import CaptureSession
@@ -28,6 +28,9 @@ from update_dialog import MODE_ERROR, MODE_LATEST, MODE_NEW, UpdateDialog
 from update_log import log as ulog
 
 SERVER_NAME = "WoAiJieTu.SingleInstance.v1"
+
+# crash.log 的文件句柄，必须挂在模块级活到进程结束（faulthandler 用它输出）
+_CRASH_FILE = None
 
 # 启动后多久去问 GitHub（留出时间给界面先起来，但尽量在用户点开设置前问完）
 UPDATE_DELAY_MS = 2000
@@ -698,7 +701,52 @@ class AppController(QObject):
         return self.hotkey.probe_conflict(normalize_sequence(sequence))
 
 
+def _install_crash_log():
+    """把「程序直接消失」这类问题留证据。
+
+    打包成 exe 后没有控制台，未捕获异常和 abort 一律无声无息 —— 用户只能
+    看到窗口突然没了。这里同时接两个口子：
+      - sys.excepthook：Python 层异常，连调用栈写进 crash.log
+      - faulthandler：PyQt5 遇到槽函数异常会直接 abort，只有它能抓到现场
+    文件放在 %APPDATA%\\我爱截图\\crash.log，跟 update.log 同一目录。
+    """
+    global _CRASH_FILE
+    import datetime
+    import traceback
+
+    path = os.path.join(config_dir(), "crash.log")
+    try:
+        # 反复崩溃时别把磁盘写满：超过 256KB 就换一份新的，旧的留作 .1
+        if os.path.exists(path) and os.path.getsize(path) > 256 * 1024:
+            os.replace(path, path + ".1")
+    except Exception:
+        pass
+    try:
+        _CRASH_FILE = open(path, "a", encoding="utf-8", buffering=1)
+    except Exception:
+        return
+
+    try:
+        import faulthandler
+        faulthandler.enable(file=_CRASH_FILE, all_threads=True)
+    except Exception:
+        pass
+
+    def _hook(exc_type, exc, tb):
+        try:
+            _CRASH_FILE.write("\n=== %s ===\n"
+                              % datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+            traceback.print_exception(exc_type, exc, tb, file=_CRASH_FILE)
+            _CRASH_FILE.flush()
+        except Exception:
+            pass
+        sys.__excepthook__(exc_type, exc, tb)
+
+    sys.excepthook = _hook
+
+
 def main():
+    _install_crash_log()
     # 必须最先做：让进程按物理像素工作。多显示器（尤其两块屏缩放比例不同）时，
     # 不声明 DPI 感知的话系统会虚拟化坐标，第二块屏抓出来是一整块黑。
     set_process_dpi_awareness()
