@@ -447,18 +447,28 @@ class SettingsDialog(QDialog):
         self.check_requested.emit()
 
     def _open_log(self):
-        """用系统默认程序打开 update.log（没有就提示一句）。"""
-        path = update_log.log_path()
-        if not os.path.exists(path):
+        """打开日志目录并选中日志文件。
+
+        日志分两个：update.log（运行、更新、每次截图会话的完整流程）和
+        crash.log（崩溃与异常栈，没出过事就没有这个文件）。以前只打开
+        update.log，崩溃记录和兜底截图还得自己去用户目录翻，所以改成
+        打开所在目录 —— 三个东西并排放着，一眼看得全。
+        """
+        folder, target = update_log.open_target()
+        if not os.path.isdir(folder):
             QMessageBox.information(self, "还没有日志",
-                                    "还没检查过更新，所以暂时没有日志。\n"
-                                    "点一下「立即检查」就会生成。")
+                                    "程序运行后才会生成日志文件。\n"
+                                    "目录：%s" % folder)
             return
         try:
-            os.startfile(path)          # noqa: S606  Windows 专用
+            if target:
+                import subprocess
+                subprocess.Popen('explorer /select,"%s"' % os.path.normpath(target))
+            else:
+                os.startfile(folder)        # noqa: S606  Windows 专用
         except Exception as e:
             QMessageBox.warning(self, "打不开日志",
-                                "请手动打开这个文件：\n%s\n\n%s" % (path, e))
+                                "请手动打开这个目录：\n%s\n\n%s" % (folder, e))
 
     def set_checking(self, on: bool):
         self._checking = bool(on)

@@ -15,6 +15,7 @@ from PyQt5.QtWidgets import QApplication, QDialog, QMenu, QMessageBox, QSystemTr
 
 import theme
 import autostart
+import update_log
 from app_config import APP_NAME, APP_VERSION, as_bool, config, config_dir
 from hotkey import HotkeyManager, normalize_sequence
 from main_window import MainWindow
@@ -734,7 +735,7 @@ def _install_crash_log():
     import datetime
     import traceback
 
-    path = os.path.join(config_dir(), "crash.log")
+    path = update_log.crash_path()
     try:
         # 反复崩溃时别把磁盘写满：超过 256KB 就换一份新的，旧的留作 .1
         if os.path.exists(path) and os.path.getsize(path) > 256 * 1024:
@@ -765,6 +766,37 @@ def _install_crash_log():
     sys.excepthook = _hook
 
 
+def _log_env():
+    """启动时把运行环境记一行。
+
+    换台机器排查时，「双屏且两块屏缩放不同」「150% 缩放」这类信息最关键，但
+    让用户自己去系统设置里翻很麻烦，还不一定说得清。这里随启动记一次，对方
+    只要把日志发过来，环境就一并有了。
+    """
+    try:
+        import platform
+        screens = []
+        union = None
+        try:
+            primary = QApplication.primaryScreen()
+            for s in QApplication.screens():
+                g = s.geometry()
+                union = g if union is None else union.united(g)
+                screens.append("%dx%d@%.2f%s" % (
+                    g.width(), g.height(), s.devicePixelRatio(),
+                    "*" if s is primary else ""))
+        except Exception:
+            pass
+        geo = "未知"
+        if union is not None:
+            geo = "%d,%d %dx%d" % (union.x(), union.y(), union.width(), union.height())
+        update_log.log("环境：%s 版本=%s 屏=%d [%s] 虚拟桌面=%s"
+                       % (platform.platform(terse=True), APP_VERSION,
+                          len(screens), " ".join(screens) or "未知", geo))
+    except Exception:
+        pass
+
+
 def main():
     _install_crash_log()
     # 必须最先做：让进程按物理像素工作。多显示器（尤其两块屏缩放比例不同）时，
@@ -788,6 +820,7 @@ def main():
     app.setQuitOnLastWindowClosed(False)
     ico = QIcon(asset("app.ico"))
     app.setWindowIcon(ico)
+    _log_env()
 
     server = acquire_single_instance()
     if server is None:

@@ -21,6 +21,33 @@ def log_path() -> str:
     return os.path.join(config_dir(), "update.log")
 
 
+def crash_path() -> str:
+    return os.path.join(config_dir(), "crash.log")
+
+
+def folder() -> str:
+    return config_dir()
+
+
+def existing_files():
+    """目录里实际存在的日志文件，按该看的先后排好。
+
+    排查时「运行与更新全流程」在 update.log，「崩溃与异常栈」在 crash.log，
+    两个都要看，所以设置页打开的是目录而不是单个文件。
+    """
+    out = []
+    for p in (log_path(), crash_path()):
+        if os.path.exists(p):
+            out.append(p)
+    return out
+
+
+def open_target():
+    """设置页点「查看日志」时该打开什么：返回 (目录, 要选中的文件或 None)。"""
+    files = existing_files()
+    return folder(), (files[0] if files else None)
+
+
 def _trim(path: str):
     try:
         with open(path, "r", encoding="utf-8", errors="replace") as f:
