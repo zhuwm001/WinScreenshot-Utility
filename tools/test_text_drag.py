@@ -22,6 +22,11 @@ sys.path.insert(0, os.path.join(ROOT, "src"))
 import qt_env  # noqa: E402  Qt 平台插件路径统一处理，避免弹 no Qt platform plugin
 qt_env.setup()
 
+import PyQt5  # noqa: E402
+_PLUG = os.path.join(os.path.dirname(PyQt5.__file__), "Qt5", "plugins")
+os.environ.setdefault("QT_PLUGIN_PATH", _PLUG)
+os.environ.setdefault("QT_QPA_PLATFORM_PLUGIN_PATH", os.path.join(_PLUG, "platforms"))
+
 from PyQt5.QtCore import QEvent, QPoint, QPointF, QRect, Qt      # noqa: E402
 from PyQt5.QtGui import QColor, QFontMetrics, QMouseEvent, QPixmap  # noqa: E402
 from PyQt5.QtWidgets import QApplication                        # noqa: E402

@@ -989,6 +989,7 @@ class CaptureOverlay(QWidget):
         if self._state == S_RESIZING:
             self._state = S_SELECTED
             self._resize_handle = ""
+            self._clamp_text_items()      # 选区变小了，跑出去的文字收回来
             self._show_bar()
             self.update()
 
@@ -1310,6 +1311,7 @@ class CaptureOverlay(QWidget):
         if y < 6:
             y = bar.y() + bar.height() + 6
         x = max(6, min(x, self.width() - pw - 6))
+        y = max(6, min(y, self.height() - ph - 6))
         if self._bar_promoted:
             # 工具条都升级成独立窗口了，说明这台机器不画遮罩的子控件，色板同理
             self._promote_palette()
@@ -1458,23 +1460,79 @@ class CaptureOverlay(QWidget):
                 " selection-background-color: rgba(74,134,255,0.8); }"
                 % self._text_color.name())
 
+    def _text_fit(self, pos_x, need_w, keep_wrap=0.0):
+        """在选区里给一段文字挑位置和换行宽度，返回 (p1.x, wrap_w)。
+
+        `need_w` 是不换行时需要的宽度，`keep_wrap` 是用户已经拖好的换行宽度。
+        放得下就原样保留；放不下就换行，并把落点左移，保证字不会落到选区外 ——
+        截图按选区裁剪，跑出去的字导出时就被切掉了。
+        """
+        sel = self._sel
+        if sel.isNull():
+            return float(pos_x), float(keep_wrap or 0.0)
+        left_lim = float(sel.left()) + 5.0
+        right_lim = float(sel.right()) - 5.0
+        x = max(left_lim, min(float(pos_x), right_lim - 8.0))
+        max_w = right_lim - x - 5.0
+        need = float(keep_wrap or 0.0) or float(need_w)
+        if need <= max_w:
+            return x, float(keep_wrap or 0.0)
+        wrap = min(right_lim - left_lim - 5.0, max(160.0, max_w))
+        x = right_lim - 5.0 - wrap
+        if x < left_lim:
+            x = left_lim
+            wrap = right_lim - x - 5.0
+        return x, max(60.0, wrap)
+
+    def _fit_text_into_sel(self, item):
+        """把一段文字收回选区里：超右边界就换行并左移，压到底边就整体上移。"""
+        sel = self._sel
+        if item is None or sel.isNull() or sel.width() < 12 or sel.height() < 12:
+            return
+        top_lim = float(sel.top()) + 5.0
+        bottom_lim = float(sel.bottom()) - 5.0
+        fm = QFontMetrics(_font(item.font_size, item.bold))
+        need = max((fm.horizontalAdvance(l) for l in item.text.split("\n")), default=0)
+        x, wrap = self._text_fit(item.p1.x(), need, float(item.wrap_w or 0.0))
+        y = max(top_lim, min(item.p1.y(), bottom_lim - 12.0))
+        item.p1 = QPointF(x, y)
+        item.wrap_w = wrap
+        r = text_rect(item)
+        if r.bottom() > bottom_lim:
+            item.p1 = QPointF(x, max(top_lim, y - (r.bottom() - bottom_lim)))
+
+    def _clamp_text_items(self):
+        for it in self._items:
+            if it.kind == T_TEXT:
+                self._fit_text_into_sel(it)
+
     def _fit_text_edit(self):
+        """输入框始终待在选区里：写得下就按内容宽度，写不下就地换行。
+
+        选区是按截图边界裁的，输入框（以及落下的文字）一旦探出去，导出时就被切掉。
+        """
         edit = self._text_edit
         if edit is None:
             return
         fm = QFontMetrics(_font(self._text_size, self._text_bold))
         lines = edit.toPlainText().split("\n")
-        if self._edit_wrap > 0:
-            w = int(self._edit_wrap) + 8
+        widest = max((fm.horizontalAdvance(l) for l in lines), default=0)
+        max_w = max(320, min(900, self.width() - 20))
+        sel = self._sel
+        bx, wrap = self._text_fit(self._text_pos.x(), widest + 20,
+                                  float(self._edit_wrap or 0.0))
+        if wrap > 0:
+            w = int(wrap) + 8
+            edit.setLineWrapMode(QTextEdit.WidgetWidth)
         else:
-            widest = max((fm.horizontalAdvance(l) for l in lines), default=0)
-            max_w = max(320, min(900, self.width() - 20))
-            w = max(190, min(widest + 30, max_w))
-        x = max(0, min(int(self._text_pos.x()) - 5, self.width() - w))
+            w = max(120, min(widest + 30, max_w))
+            edit.setLineWrapMode(QTextEdit.NoWrap)
+        x = int(bx) - 5
+        x = max(0, min(x, self.width() - w))
         # 先定宽度让文档重排，再按重排后的高度定高
         y = max(0, min(int(self._text_pos.y()) - 5, self.height() - 24))
         edit.setGeometry(x, y, w, max(24, fm.lineSpacing() + 10))
-        if self._edit_wrap > 0:
+        if wrap > 0:
             # 显式给文档定宽，否则未显示的控件不会按新宽度重排
             doc = edit.document()
             doc.setDocumentMargin(0)
@@ -1484,6 +1542,9 @@ class CaptureOverlay(QWidget):
             h = fm.lineSpacing() * max(1, len(lines)) + 10
         # 输入框内文字起点与最终绘制位置对齐：偏移 = 边框 1 + 内边距 3 + 1
         y = max(0, min(int(self._text_pos.y()) - 5, self.height() - h))
+        if not sel.isNull():
+            # 输入框也留在选区里，否则打字时看得见、一提交又得往上跳
+            y = max(int(sel.top()) - 6, min(y, int(sel.bottom()) - h - 4))
         edit.setGeometry(x, y, w, h)
 
     # ---------------------------------------------------------- 字号 / 粗细
@@ -1555,13 +1616,17 @@ class CaptureOverlay(QWidget):
                 if item not in self._items:
                     self._items.append(item)
             else:
-                self._items.append(AnnotItem(T_TEXT, self._text_pos, self._text_pos,
-                                             self._text_color, 3,
-                                             text=text, font_size=self._text_size,
-                                             bold=self._text_bold))
+                item = AnnotItem(T_TEXT, self._text_pos, self._text_pos,
+                                 self._text_color, 3,
+                                 text=text, font_size=self._text_size,
+                                 bold=self._text_bold)
+                self._items.append(item)
         elif item is not None and item in self._items:
             # 内容被清空 -> 删掉这条标注
             self._items.remove(item)
+
+        if item is not None and item in self._items:
+            self._fit_text_into_sel(item)
 
         self._committing = False
         self._state = S_SELECTED
