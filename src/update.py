@@ -753,7 +753,10 @@ def build_install_command(installer: str, restart_exe: str = "", restart_args=()
         # 注意步骤之间用 & 连接，ping 万一不可用也不会中断后面的安装。
         steps.append("ping -n %d 127.0.0.1 >nul" % (delay_seconds + 1))
     if silent:
-        mode = ("/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /NOCANCEL "
+        # /SILENT（不是 /VERYSILENT）：保留安装进度窗口。静默安装是把主程序关掉、
+        # 后台换文件，如果连进度窗口都没有，用户在这十几秒里完全看不到反馈。
+        # 进度窗口的标题和「正在安装」都来自安装包的语言文件，会显示软件名。
+        mode = ("/SILENT /SUPPRESSMSGBOXES /NORESTART /NOCANCEL "
                 "/CLOSEAPPLICATIONS")
     else:
         mode = "/NORESTART /NOCANCEL /CLOSEAPPLICATIONS"

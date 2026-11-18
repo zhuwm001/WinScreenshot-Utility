@@ -101,7 +101,10 @@ def test_command():
         r"C:\Users\a b\AppData\Local\Programs\我爱截图\我爱截图.exe",
         ["--autostart"], delay_seconds=3)
     check("等待退出", "ping -n 4 127.0.0.1" in cmd)
-    check("静默参数", "/VERYSILENT" in cmd and "/SUPPRESSMSGBOXES" in cmd)
+    # 静默安装保留进度窗口（/SILENT，而不是 /VERYSILENT）：主程序退出后到新版
+    # 启动之间十几秒，什么都没有的话用户不知道在装还是崩了
+    check("静默但保留进度窗口", "/SILENT" in cmd and "/VERYSILENT" not in cmd)
+    check("静默参数", "/SUPPRESSMSGBOXES" in cmd)
     check("不自动重启系统", "/NORESTART" in cmd)
     check("允许关闭占用程序", "/CLOSEAPPLICATIONS" in cmd)
     check("路径带引号", '"C:\\Temp\\wojietu-setup-1.1.0.exe"' in cmd)
@@ -185,7 +188,8 @@ def test_install_helpers():
     check("安装目录可写", up.install_dir_writable())
 
     ui = up.build_install_command(r"C:\a\b.exe", r"C:\c\d.exe", [], 0, silent=False)
-    check("非静默不带 /VERYSILENT", "/VERYSILENT" not in ui and "/SUPPRESSMSGBOXES" not in ui)
+    check("非静默不带任何静默开关", "/VERYSILENT" not in ui and "/SILENT" not in ui
+          and "/SUPPRESSMSGBOXES" not in ui)
     check("非静默仍会拉起新版", ui.rstrip().endswith('"C:\\c\\d.exe"'), ui[-24:])
 
 

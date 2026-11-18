@@ -18,6 +18,7 @@ import autostart
 import update_log
 from app_config import APP_NAME, APP_VERSION, as_bool, config, config_dir
 from hotkey import HotkeyManager, normalize_sequence
+from install_notice import InstallNotice
 from main_window import MainWindow
 from overlay import CaptureSession
 from paths import asset
@@ -33,6 +34,10 @@ from update_dialog import MODE_ERROR, MODE_LATEST, MODE_NEW, UpdateDialog
 from update_log import log as ulog
 
 SERVER_NAME = "WoAiJieTu.SingleInstance.v1"
+
+# 静默安装时提示卡片停留多久。安装程序在进程退出后还要等 3 秒才开始，
+# 卡片留 2.8 秒刚好让两边接上，中间不留空档。
+INSTALL_NOTICE_MS = 2800
 
 # crash.log 的文件句柄，必须挂在模块级活到进程结束（faulthandler 用它输出）
 _CRASH_FILE = None
@@ -646,14 +651,24 @@ class AppController(QObject):
             warn_box.exec_()
             return
         if silent:
-            Toast.show_toast("正在安装新版本", "软件会自动关闭并重新打开。",
-                             kind="check", timeout=2500)
+            # 静默安装从退出到新版启动之间没有任何界面，只留这一张卡片：
+            # 让人知道确实在装，而不是程序崩了。卡片显示够时间后主程序才退出，
+            # 之后由安装程序的进度窗口接着显示到装完。
+            # 先把主窗口和更新窗口收掉，屏幕上只剩这张卡片，不然卡片浮在
+            # 半个屏幕的窗口上面，看着像卡住了。
+            if self._update_dlg is not None:
+                self._update_dlg.close()
+            self.win.hide()
+            self._install_notice = InstallNotice.popup_notice()
+            ulog("显示安装提示卡片，%d ms 后退出" % INSTALL_NOTICE_MS)
+            QTimer.singleShot(INSTALL_NOTICE_MS, self.quit_app)
         else:
+            # 需要管理员权限时会弹安装向导，用户看得见，不用额外卡片
             Toast.show_toast("请在安装向导中完成安装",
                              "当前目录需要管理员权限，无法自动安装。",
                              kind="warn", timeout=6000)
-        # 留一点时间让界面刷完再退出；安装程序自己会等 3 秒
-        QTimer.singleShot(300, self.quit_app)
+            # 留一点时间让界面刷完再退出；安装程序自己会等 3 秒
+            QTimer.singleShot(300, self.quit_app)
 
     def _notify_update_result(self):
         """上一次更新之后第一次启动：明确告诉用户「成了」还是「没成」。
