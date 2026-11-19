@@ -6,8 +6,9 @@ import os
 from PyQt5.QtCore import QSize, Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QIcon
 from PyQt5.QtWidgets import (
-    QCheckBox, QDialog, QFrame, QHBoxLayout, QLabel, QLineEdit, QMessageBox,
-    QPushButton, QRadioButton, QToolButton, QVBoxLayout,
+    QApplication, QCheckBox, QDialog, QFrame, QHBoxLayout, QLabel, QLineEdit,
+    QMessageBox, QPushButton, QRadioButton, QScrollArea, QToolButton,
+    QVBoxLayout, QWidget,
 )
 
 import icons
@@ -225,9 +226,31 @@ class SettingsDialog(QDialog):
         self.setMinimumWidth(500)
         self.setWindowFlag(Qt.WindowContextHelpButtonHint, False)
 
-        root = QVBoxLayout(self)
+        # 内容区放进滚动区：1366×768 这类屏幕上，全部卡片摊开会比屏幕还高，
+        # 底部按钮被挤到屏幕外面，用户连「保存」都点不到。
+        # 按钮固定在底部，只有中间的内容滚动。
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        self._scroll = QScrollArea(self)
+        self._scroll.setWidgetResizable(True)
+        self._scroll.setFrameShape(QFrame.NoFrame)
+        self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._scroll.setStyleSheet(
+            "QScrollArea{background: transparent; border: none;}")
+        self._scroll.viewport().setAutoFillBackground(False)
+        self._scroll.setMinimumHeight(440)
+
+        content = QWidget()
+        content.setObjectName("settingsBody")
+        content.setStyleSheet(
+            "QWidget#settingsBody{background: transparent;}")
+        root = QVBoxLayout(content)
         root.setContentsMargins(22, 16, 22, 14)
         root.setSpacing(10)
+        self._scroll.setWidget(content)
+        outer.addWidget(self._scroll, 1)
 
         # ---------------- 截图行为 ----------------
         body = self._card("截图", root)
@@ -382,13 +405,23 @@ class SettingsDialog(QDialog):
         self.btn_ok.setDefault(True)
         self.btn_ok.clicked.connect(self.accept)
         btns.addWidget(self.btn_ok)
-        root.addLayout(btns)
+        btns.setContentsMargins(22, 10, 22, 14)
+        btn_row = QWidget(self)
+        btn_row.setLayout(btns)
+        outer.addWidget(btn_row)
 
         self._on_hotkey_changed(self.hotkey_edit.value())
         # 版本号那一行元素多（版本号 + 绿箭头 + 立即检查 + 查看日志 + 复选框）：
         # 窗口窄到一定程度会把复选框挤出可视区，看起来就像「没勾选」。
         # 这里按内容算一次自然宽度当最小宽度，字号变大时也跟着变。
-        self.setMinimumWidth(max(500, self.sizeHint().width()))
+        width = max(500, self.sizeHint().width())
+        self.setMinimumWidth(width)
+        # 高度按屏幕可用高度来：大屏尽量一次显示完，768 屏不超出屏幕
+        try:
+            avail = QApplication.primaryScreen().availableGeometry().height()
+        except Exception:
+            avail = 900
+        self.resize(width, max(440, min(700, int(avail * 0.86))))
         self._ready = True
 
     # ---------- 快捷键相关提示 ----------
@@ -538,7 +571,8 @@ class SettingsDialog(QDialog):
 
     # ---------- 组件 ----------
     def _card(self, title: str, parent_layout) -> QVBoxLayout:
-        card = QFrame(self)
+        # 父对象要挂到卡片实际所在的容器（滚动区里的 content），不是对话框本身
+        card = QFrame(parent_layout.parentWidget() or self)
         card.setObjectName("card")
         lay = QVBoxLayout(card)
         lay.setContentsMargins(16, 10, 16, 12)

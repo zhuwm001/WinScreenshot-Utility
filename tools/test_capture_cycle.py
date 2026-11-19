@@ -33,6 +33,11 @@ import hotkey as hk  # noqa: E402
 import main as appmain  # noqa: E402
 from app_config import config  # noqa: E402
 
+# 这个测试用 keybd_event 模拟按键，那些键在系统眼里全是「注入」的。
+# 产品从 1.3.2 起会拦别的程序注入的 Ctrl+C / Esc，所以这里把来源判定关掉 ——
+# 这条测的是「热键链路能不能反复用」，防注入另有 test_injected_key 专门覆盖。
+hk.was_injected = lambda vk: False
+
 user32 = ctypes.WinDLL("user32", use_last_error=True)
 
 INPUT_KEYBOARD = 1
@@ -161,7 +166,7 @@ pump(700)
 check("1 热键唤起遮罩", ctrl.overlay is not None)
 drag(P1, P2)
 if ctrl.overlay is not None:
-    check("1 框选出选区", not ctrl.overlay._sel.isNull(), ctrl.overlay._sel)
+    check("1 框选出选区", not ctrl.overlay.overlays[0]._sel.isNull(), ctrl.overlay.overlays[0]._sel)
 key_event(0x0D)          # Enter = 复制
 key_event(0x0D, True)
 pump(800)
@@ -171,7 +176,7 @@ check("1 图片进了剪贴板", not app.clipboard().image().isNull())
 send_hotkey(mods, vk)
 pump(800)
 check("1 复制之后再按快捷键，仍能唤起", ctrl.overlay is not None)
-ctrl.overlay._cancel()
+ctrl.overlay.overlays[0]._cancel()
 pump(400)
 
 # ---------- 2) Esc 取消 ----------
@@ -186,7 +191,7 @@ check("2 Esc 后遮罩已关闭", ctrl.overlay is None)
 send_hotkey(mods, vk)
 pump(800)
 check("2 取消之后再按快捷键，仍能唤起", ctrl.overlay is not None)
-ctrl.overlay._cancel()
+ctrl.overlay.overlays[0]._cancel()
 pump(400)
 
 # ---------- 3) 图钉贴图 ----------
@@ -202,7 +207,7 @@ check("3 贴图窗口已出现", ctrl.overlay is None)
 send_hotkey(mods, vk)
 pump(800)
 check("3 贴图之后再按快捷键，仍能唤起", ctrl.overlay is not None)
-ctrl.overlay._cancel()
+ctrl.overlay.overlays[0]._cancel()
 pump(400)
 
 # ---------- 4) 隐藏/显示主界面后还能用 ----------
@@ -213,7 +218,7 @@ pump(300)
 send_hotkey(mods, vk)
 pump(800)
 check("4 隐藏到托盘后再按快捷键，仍能唤起", ctrl.overlay is not None)
-ctrl.overlay._cancel()
+ctrl.overlay.overlays[0]._cancel()
 pump(300)
 
 ctrl.quit_app()

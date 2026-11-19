@@ -209,11 +209,8 @@ class UpdateDialog(QDialog):
     def _fill_error(self):
         self.lbl_title.setText("检查更新失败")
         self.lbl_sub.setText("当前版本 %s" % APP_VERSION)
-        self.box.setPlainText((self._error_text or "") +
-                              "\n\n可以点「打开发布页」手动确认是否有新版本。")
-        # 超时这类提示现在会指出该查哪个域名 / 是不是 PAC，比原来的「请检查网络」
-        # 长一倍；高度给够，否则几行字要拖滚动条才看得全。
-        self.box.setFixedHeight(140)
+        self.box.setPlainText(self._error_text or "未知错误。")
+        self.box.setFixedHeight(110)
         self.btn_go.setText("重试")
         self.btn_go.clicked.disconnect()
         self.btn_go.clicked.connect(self._on_retry)

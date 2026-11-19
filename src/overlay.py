@@ -1053,7 +1053,8 @@ class CaptureOverlay(QWidget):
 
         两道关：
           1. 来源 —— 是不是别的程序用 SendInput 灌进来的（低级钩子带 LLKHF_INJECTED）
-          2. 时机 —— 框选刚定案的头 300ms，人手按不了这么快
+          2. 时机 —— 框选刚定案的头 300ms，人手按不了这么快（只对 Ctrl+C 用：
+             注入源就是它；回车人人都会立刻按，不能拦）
         命中就返回 True，调用方直接放弃，遮罩和工具条原地不动，用户再操作一次即可。
         """
         injected = False
@@ -1142,7 +1143,10 @@ class CaptureOverlay(QWidget):
             self._cancel()
             return
         if key in (Qt.Key_Return, Qt.Key_Enter):
-            if self._guard_action(key, "回车"):
+            # 回车不设时间关：人手松手后立刻回车很常见（0.2 秒都算慢的），
+            # 拦了就变成「回车没反应，得再按一次」——修一个 bug 换一个更烦的。
+            # 注入的 Ctrl+C 才是要拦的目标，那一条才查时间。
+            if self._guard_action(key, "回车", check_time=False):
                 return
             ulog("回车完成：工具条可见=%s 独立窗口=%s"
                  % (self._bar.isVisible(), self._bar_promoted))

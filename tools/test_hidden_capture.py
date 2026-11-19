@@ -108,7 +108,7 @@ def check(name, cond, extra=""):
 
 def close_overlay(ctrl):
     if ctrl.overlay is not None:
-        ctrl.overlay._cancel()
+        ctrl.overlay.overlays[0]._cancel()
     pump(200)
 
 

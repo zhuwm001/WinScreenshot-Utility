@@ -437,24 +437,25 @@ class UpdateChecker(QObject):
     只认**签过名**的清单（latest.json）：拿不到或验签不过一律失败，
     绝不退回去用未签名的数据。
 
-    Qt 的 HTTPS 依赖它自己去加载 OpenSSL，个别 Win10/Win11 上会报
-    「TLS initialization failed」（组件没带全、被安全软件换掉、架构不对都可能）。
-    这时改用它自己进程里 Python 自带的 SSL 再取一次 —— 两条腿走路，
-    总比一声不响地「什么都没查到」强。全过程写 update.log。
+    主通道是 Python 自带的 SSL，不是 Qt。原因是报障现场反复出现同一种形态：
+    请求发出去，12 秒里一个字节都没回来、连错误回调都没有，而同一时刻同一网络
+    下 Python 通道 3 秒就能拿到同一份清单。这是 Qt 网络栈在个别机器上的问题
+    （连接复用、DNS 缓存、系统代理残留都可能），跟"有没有新版本"没有关系 ——
+    请求发的是同一个 URL，版本比较发生在拿到内容之后。
 
-    更常见的是**根本没有任何动静**：请求发出去，12 秒里一个字节都没回来，
-    连错误都没有（日志里只有「超时：12 秒没响应」）。这多半是连接被中间设备
-    直接丢弃（代理没覆盖到、PAC 脚本 Qt 不认识、线路被重置）。所以第二条腿
-    不再只在 TLS 报错时才用 —— 5 秒还没结果就同时开跑，谁先回来用谁的。
+    Qt 仍然保留成兜底：打包环境里 Python 的证书链偶尔不完整，而 Qt 自带的
+    OpenSSL 是随包发出的。主通道 3 秒不回就同时开跑，谁先回来用谁的，只发一次结果。
     """
 
     found = pyqtSignal(object)     # ReleaseInfo
     latest = pyqtSignal(str)       # 当前版本，已是最新
     failed = pyqtSignal(str)       # 人话版错误
+    # 工作线程拿到的原始字节交回主线程处理：定时器和网络对象都只属于主线程
+    _raw = pyqtSignal(object)
 
-    # Qt 通道 5 秒还没结果就同时开 Python 通道：正常网络 1–3 秒就回来了，
-    # 等到 5 秒基本可以断定这条腿在干等，而另一条常常几秒就能拿到。
-    HEDGE_MS = 5000
+    # 主通道 3 秒还没结果就同时开 Qt 兜底：正常网络 1–3 秒就回来了，
+    # 等到 3 秒基本可以断定这条腿在干等。
+    HEDGE_MS = 3000
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -464,13 +465,20 @@ class UpdateChecker(QObject):
         self._current = APP_VERSION
         self._fallback_used = False
         self._extended = False
-        self._timeout_s = 12
+        self._timeout_s = 10
         self._timer = QTimer(self)
         self._timer.setSingleShot(True)
         self._timer.timeout.connect(self._on_timeout)
         self._hedge = QTimer(self)
         self._hedge.setSingleShot(True)
-        self._hedge.timeout.connect(self._start_stdlib_channel)
+        self._hedge.timeout.connect(self._start_qt_channel)
+        self._raw.connect(self._on_raw)
+
+    def _on_raw(self, data):
+        """主通道（工作线程）把字节交回来，在主线程里解析。"""
+        if self._done:
+            return
+        self._handle_bytes(bytes(data))
 
     # ---------- 发信号（工作线程里也可能调，别让对象已销毁时崩掉） ----------
     def _emit(self, sig, arg):
@@ -488,12 +496,13 @@ class UpdateChecker(QObject):
         self._hedge.stop()
         self._emit(sig, arg)
 
-    def check(self, current=APP_VERSION, timeout_ms=12000):
+    def check(self, current=APP_VERSION, timeout_ms=10000):
         self._current = current or APP_VERSION
         self._timeout_s = max(1, int(timeout_ms / 1000))
         self._done = False
         self._fallback_used = False
         self._extended = False
+        self._reply = None
         try:
             ssl_text = ssl.OPENSSL_VERSION
         except Exception:
@@ -501,47 +510,59 @@ class UpdateChecker(QObject):
         ulog("开始检查更新：本地 %s（Python SSL：%s）" % (self._current, ssl_text))
         pac = _pac_url()
         if pac:
-            ulog("系统设置了代理自动配置脚本（PAC）：%s —— Qt 不支持 PAC，这条路可能连不上" % pac)
+            ulog("系统配置了 PAC：%s（仅记录，本次不走它）" % pac)
+        # 主通道用 Python 自带的 SSL：它每次新建连接、只认环境变量里的代理，
+        # 不会被 Qt 的连接复用、DNS 缓存或系统代理残留拖住。
+        # 同一环境下实测：Qt 空等 12 秒一个字节都没有，这条 3 秒就拿到清单。
+        self._start_python_channel()
+        self._hedge.start(min(self.HEDGE_MS, max(1000, timeout_ms - 4000)))
+        self._timer.start(timeout_ms)
+
+    # ---------- 两条通道 ----------
+    def _start_python_channel(self):
+        """主通道：Python 自带的 SSL（只开一次）。"""
+        if self._done or self._fallback_used:
+            return
+        self._fallback_used = True
+        threading.Thread(target=self._stdlib_fetch, daemon=True).start()
+
+    def _start_qt_channel(self):
+        """兜底通道：Qt 的网络栈。主通道迟迟不回时才启动。
+
+        留它是因为打包环境里 Python 的证书链偶尔不完整，而 Qt 自带 OpenSSL
+        是随包发出的 —— 两条腿各自可能坏的地方不一样。
+        """
+        if self._done or self._reply is not None:
+            return
+        ulog("主通道 %d ms 未返回，同时启动 Qt 通道" % self.HEDGE_MS)
         self._reply = self._nam.get(_request(MANIFEST_URL))
         self._reply.finished.connect(self._on_finished)
-        self._hedge.start(min(self.HEDGE_MS, max(1000, timeout_ms - 3000)))
-        self._timer.start(timeout_ms)
 
     # ---------- 收尾 ----------
     def _on_timeout(self):
         if self._done:
             return
-        # 第二条腿已经开跑就别在这时判死：它常常已经是最后几秒了，
-        # 再给它一小段，比弹一句"超时"然后其实拿到数据强。
-        if self._fallback_used and not self._extended:
+        # 两条腿都还没结果时别立刻判死：再给最后一小段，
+        # 比弹一句"超时"然后其实数据马上到了强。
+        if not self._extended:
             self._extended = True
-            ulog("整体预算用完，但备用通道还在跑，再等 4 秒")
-            self._timer.start(4000)
+            ulog("总时长用完，再等 3 秒收尾")
+            self._timer.start(3000)
             return
-        ulog("超时：%d 秒没响应" % getattr(self, "_timeout_s", 12))
-        try:
-            self._reply.abort()
-        except Exception:
-            pass
-        pac = _pac_url()
-        if pac:
-            self._deliver(self.failed,
-                          "连接 GitHub 超时（%d 秒无响应）。系统启用了代理自动配置脚本"
-                          "（PAC），本程序用不了它，请把代理软件切换成「系统代理」或"
-                          "「TUN / 全局」模式后重试。" % self._timeout_s)
-        else:
-            self._deliver(self.failed,
-                          "连接 GitHub 超时（%d 秒无响应）。请确认网络畅通、代理已开启；"
-                          "如果代理按域名分流，请让 github.com 与 "
-                          "release-assets.githubusercontent.com 都走代理。"
-                          % self._timeout_s)
+        ulog("超时：%d 秒没响应" % getattr(self, "_timeout_s", 10))
+        reply = self._reply
+        if reply is not None:
+            try:
+                reply.abort()
+            except Exception:
+                pass
+        self._deliver(self.failed, "连接 GitHub 超时，请检查网络或代理后重试。")
 
     def _on_finished(self):
         if self._done:
             return
-        self._timer.stop()
-        self._hedge.stop()
         reply = self._reply
+        self._reply = None
         try:
             self._finish(reply)
         finally:
@@ -558,18 +579,9 @@ class UpdateChecker(QObject):
             self._deliver(self.failed, _http_hint(int(status)))
             return
         if err:
-            detail = reply.errorString()
-            ulog("Qt 请求失败：%s" % detail)
-            if _is_tls_error(detail):
-                # TLS 起不来几乎是必现的，别等 5 秒对冲，立刻换 Python 通道
-                self._start_stdlib_channel()
-                return
-            # 连接被重置 / 域名解析失败这类很快出结果的错误：同样让另一条腿试一次，
-            # 两条腿的失败点常常不一样（一个走代理、一个走直连）。
-            if not self._fallback_used:
-                self._start_stdlib_channel()
-                return
-            self._deliver(self.failed, _network_error(detail))
+            # 这条只是兜底：主通道（Python）还在跑，别在这里抢先判死。
+            # 两条都失败时由总超时收尾，文案只有一句。
+            ulog("Qt 通道失败：%s（等主通道结果）" % reply.errorString())
             return
 
         self._handle_bytes(bytes(reply.readAll()))
@@ -601,30 +613,26 @@ class UpdateChecker(QObject):
         ulog("远端 %s > 本地 %s：发现新版本" % (remote, self._current))
         self._deliver(self.found, info)
 
-    def _start_stdlib_channel(self):
-        """开第二条腿：用 Python 自带的 SSL 再取一次（只开一次）。"""
-        if self._done or self._fallback_used:
-            return
-        self._fallback_used = True
-        ulog("改用 Python 自带的 SSL 取一次（两条通道并行，谁先回来用谁）")
-        threading.Thread(target=self._stdlib_fetch, daemon=True).start()
-
     def _stdlib_fetch(self):
+        """主通道：在工作线程里取清单，取到就把字节交回主线程。
+
+        这里只做网络，不碰定时器、不碰 QNetworkAccessManager ——
+        那些对象属于主线程，跨线程用是崩程序的常见来源。
+        """
         t0 = time.time()
         try:
             req = urllib.request.Request(
                 MANIFEST_URL,
                 headers={"User-Agent": USER_AGENT, "Cache-Control": "no-cache"})
-            with urllib.request.urlopen(req, timeout=8) as resp:
+            with urllib.request.urlopen(req, timeout=max(8, self._timeout_s + 2)) as resp:
                 data = resp.read()
         except Exception as e:
-            detail = "%s: %s" % (type(e).__name__, e)
-            ulog("备用通道也失败（%.1fs）：%s" % (time.time() - t0, detail))
-            if not self._done:
-                self._deliver(self.failed, _network_error(detail))
+            # 不在这里报错：兜底通道可能马上就有结果，判死留给总超时。
+            ulog("主通道失败（%.1fs）：%s: %s"
+                 % (time.time() - t0, type(e).__name__, e))
             return
-        ulog("备用通道拿到清单（%.1fs）" % (time.time() - t0))
-        self._handle_bytes(data)
+        ulog("主通道拿到清单（%.1fs，%d 字节）" % (time.time() - t0, len(data)))
+        self._raw.emit(data)
 
 
 

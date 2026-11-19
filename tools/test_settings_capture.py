@@ -1,13 +1,20 @@
 # -*- coding: utf-8 -*-
 """设置页开着的时候能不能截图（回归测试）。
 
-出过的 bug：设置页用 exec_() 打开，那是**应用级模态**，遮罩照样出现，但 Qt 把
-鼠标事件全拦在模态窗口那边 —— 用户看到的是"灰了但框不动"，按 Esc 把设置关掉
-之后又能框了。所以这个测试盯三件事：
+出过两次问题，方向正好相反：
 
-  1. 设置页打开后没有模态窗口（activeModalWidget() 必须是 None）
-  2. 设置页开着也能起截图：遮罩建得起来、能收到鼠标
-  3. 截图期间设置页被藏起来（配置了「截图时隐藏窗口」），结束后放回来
+  v1.3.2：设置页用 exec_() 打开，那是**应用级模态**，遮罩照样出现，但 Qt 把
+          鼠标事件全拦在模态窗口那边 —— 用户看到的是"灰了但框不动"。
+  v1.3.3：改成非模态解决了框不动，但设置页变成无父的独立窗口，
+          关掉主窗口它还在，而且截图时会被一起藏掉 —— 用户就截不到设置页本身。
+
+现在的约定是：**窗口模态**（只挡主窗口，不挡遮罩）+ 截图期间设置页保持可见。
+这个测试盯四件事：
+
+  1. 设置页是 WindowModal，且父窗口是主界面
+  2. 遮罩能收到鼠标（框选状态真的会变），说明没被模态拦住
+  3. 截图期间设置页**仍然可见**（用户要截的就是它）
+  4. 关掉设置页后热键恢复、不留模态残留
 
 用法：
     python tools/test_settings_capture.py
@@ -58,26 +65,25 @@ config.save()
 server = QLocalServer()
 ctrl = m.AppController(app, server)
 
-print("1) 设置页不是模态窗口")
+print("1) 设置页是窗口模态，挂在主界面下面")
 ctrl.open_settings()
 pump(200)
 dlg = ctrl._settings_dlg
 check("设置页已打开", dlg is not None and dlg.isVisible())
-check("没有应用级模态窗口", QApplication.activeModalWidget() is None,
-      str(QApplication.activeModalWidget()))
-check("窗口自身不是模态", not dlg.isModal())
+check("窗口模态是 WindowModal", dlg.windowModality() == Qt.WindowModal,
+      str(dlg.windowModality()))
+check("父窗口是主界面", dlg.parent() is ctrl.win, str(dlg.parent()))
 
-print("2) 设置页开着也能起截图")
+print("2) 设置页开着也能框选")
 ctrl.start_capture()
 pump(400)
 check("遮罩已建立", ctrl.overlay is not None)
-check("截图期间设置页被藏起来", not dlg.isVisible())
-check("仍然没有模态窗口", QApplication.activeModalWidget() is None)
+check("截图期间设置页仍然可见", dlg.isVisible())
 
 if ctrl.overlay is not None:
     ov = ctrl.overlay.overlays[0]
-    # 直接给遮罩发鼠标事件：模态在的时候这些事件会被 Qt 拦掉，
-    # 换成非模态后必须能到控件上，框选状态才会从 IDLE 变成 SELECTING。
+    # 直接给遮罩发鼠标事件：应用级模态时这些事件会被 Qt 拦掉，
+    # 窗口模态下遮罩不是父窗口的子窗口，必须能到控件上。
     QTest.mousePress(ov, Qt.LeftButton, Qt.NoModifier, QPoint(60, 60))
     pump(60)
     QTest.mouseMove(ov, QPoint(220, 180))
@@ -90,15 +96,16 @@ if ctrl.overlay is not None:
     ov._cancel()
     pump(250)
 
-print("3) 截图结束后设置页回来了")
-check("设置页重新可见", dlg.isVisible())
+print("3) 截图结束后设置页还在原处")
+check("设置页仍然可见", dlg.isVisible())
 check("遮罩已收尾", ctrl.overlay is None)
 
 print("4) 关掉设置页：热键恢复、不留模态残留")
 dlg.reject()
 pump(150)
 check("控制器不再持有设置页", ctrl._settings_dlg is None)
-check("没有残留模态窗口", QApplication.activeModalWidget() is None)
+check("没有残留模态窗口", QApplication.activeModalWidget() is None,
+      str(QApplication.activeModalWidget()))
 
 print()
 if FAIL:
