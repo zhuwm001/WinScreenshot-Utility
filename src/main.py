@@ -169,6 +169,9 @@ class AppController(QObject):
         self._capture_guard = False
         self._copy_note = ""            # 剪贴板写不进去时的落盘路径（用于提示）
         self._hide_rect = QRect()
+        self._hide_rects = []           # 截图时要藏起来、之后再补抓的窗口区域
+        self._restore_settings = False  # 截图前藏了设置窗口，结束后要放回来
+        self._settings_original = ""    # 打开设置前的快捷键，取消时回滚
         self._checker = None
         self._update_dlg = None
         self._settings_dlg = None
@@ -344,24 +347,37 @@ class AppController(QObject):
 
         self._restore_main = self.win.isVisible()
         self._hide_rect = QRect()
+        self._hide_rects = []
         if config.get("hide_self") and self.win.isVisible():
             # 自己的窗口要先藏起来，否则会被截进去；但画面已经拍好，
             # 只需要等它真正消失后把那一小块区域重抓一次补回去。
             self._hide_rect = QRect(self.win.frameGeometry())
+            self._hide_rects.append(self._hide_rect)
             self.win.hide()
-            # 等窗口真正从合成器上撤走（约两帧），再只补抓这一块
-            QTimer.singleShot(120, lambda: self._open_overlay(desk))
-        else:
-            QTimer.singleShot(0, lambda: self._open_overlay(desk))
+        # 设置窗口同理：它开着的时候也要能截图，所以它不是模态的，
+        # 但开着就会挡住画面、还会被截进去 —— 一起藏掉，事后放回来。
+        self._restore_settings = False
+        dlg = self._settings_dialog()
+        if dlg is not None and dlg.isVisible():
+            self._hide_rects.append(QRect(dlg.frameGeometry()))
+            if config.get("hide_self"):
+                dlg.hide()
+                self._restore_settings = True
+        # 等窗口真正从合成器上撤走（约两帧），再把藏起来的那几块重抓补回去
+        QTimer.singleShot(120 if self._hide_rects else 0,
+                          lambda: self._open_overlay(desk))
 
     def _release_guard(self):
         self._capture_guard = False
         self._copy_note = ""            # 剪贴板写不进去时的落盘路径（用于提示）
 
     def _open_overlay(self, desk=None):
-        if desk is not None and not self._hide_rect.isNull():
-            desk.patch(self._hide_rect)
+        if desk is not None and self._hide_rects:
+            for rect in self._hide_rects:
+                if not rect.isNull():
+                    desk.patch(rect)
         self._hide_rect = QRect()
+        self._hide_rects = []
 
         self.overlay = CaptureSession(desk,
                                       config.get("pen_color"),
@@ -440,6 +456,15 @@ class AppController(QObject):
             self.win.setAttribute(Qt.WA_ShowWithoutActivating, True)
             self.win.show()
         self._restore_main = False
+        if self._restore_settings:
+            self._restore_settings = False
+            dlg = self._settings_dialog()
+            try:
+                if dlg is not None and not dlg.isVisible():
+                    dlg.setAttribute(Qt.WA_ShowWithoutActivating, True)
+                    dlg.show()
+            except RuntimeError:
+                pass
 
     # ------------------------------------------------------------ 更新
     def _startup_update_check(self):
@@ -703,31 +728,56 @@ class AppController(QObject):
 
     # ------------------------------------------------------------ 设置
     def open_settings(self):
-        original = config.get("hotkey")
-        try:
-            dlg = SettingsDialog(config, self._try_apply_hotkey, None,
-                                 update_info=self._available_update,
-                                 probe_hotkey=self._probe_hotkey)
-            dlg.check_requested.connect(self._on_settings_check)
-            # 只在"正在录快捷键"的那一小段时间停掉热键。
-            # 以前是整个对话框生命周期都停，结果设置页开着就再也截不了图 ——
-            # 用户会以为程序坏了，而不是"被设置挡住了"。
-            dlg.hotkey_recording.connect(
-                lambda on: self.hotkey.set_enabled(not on))
-            # 设置页开着的时候查到新版本，箭头和「上次检查」要能当场刷新
-            self._settings_dlg = dlg
-            accepted = dlg.exec_() == QDialog.Accepted
-            wants_update = bool(getattr(dlg, "wants_update", False))
-        finally:
-            self._settings_dlg = None
-            self.hotkey.set_enabled(True)     # 对话框以任何方式关掉都恢复
+        """打开设置页。**非模态** —— 它开着的时候也要能截图。
+
+        以前这里用 dlg.exec_()，那是应用级模态：按下截图快捷键后遮罩照样出现，
+        但 Qt 会把鼠标事件全部拦在模态窗口这边，表现就是「灰了但框不动」。
+        按 Esc 恰好把设置窗口关掉，模态解除，于是"同一块灰色区域又能框了" ——
+        这两件事其实是同一个原因。
+        """
+        existing = self._settings_dialog()
+        if existing is not None:
+            existing.show()
+            existing.raise_()
+            existing.activateWindow()
+            return
+
+        self._settings_original = config.get("hotkey")
+        dlg = SettingsDialog(config, self._try_apply_hotkey, None,
+                             update_info=self._available_update,
+                             probe_hotkey=self._probe_hotkey)
+        dlg.setModal(False)
+        dlg.check_requested.connect(self._on_settings_check)
+        # 只在"正在录快捷键"的那一小段时间停掉热键。
+        # 以前是整个对话框生命周期都停，结果设置页开着就再也截不了图 ——
+        # 用户会以为程序坏了，而不是"被设置挡住了"。
+        dlg.hotkey_recording.connect(
+            lambda on: self.hotkey.set_enabled(not on))
+        dlg.finished.connect(
+            lambda code: self._on_settings_closed(dlg, code == QDialog.Accepted))
+        # 设置页开着的时候查到新版本，箭头和「上次检查」要能当场刷新
+        self._settings_dlg = dlg
+        self._restore_settings = False
+        dlg.show()
+        dlg.raise_()
+        dlg.activateWindow()
+
+    def _on_settings_closed(self, dlg, accepted: bool):
+        """设置页以任何方式关掉（保存 / 取消 / 右上角 / Esc）都在这里收尾。"""
+        if self._settings_dlg is not dlg:
+            return
+        self._settings_dlg = None
+        self._restore_settings = False
+        self.hotkey.set_enabled(True)     # 对话框关掉就恢复，不管之前是不是在录音
         if accepted:
             self.win.set_hotkey_text(config.get("hotkey"))
             self._refresh_tray_menu()
             self.hotkey.register(config.get("hotkey"))
         else:
             # 对话框里可能已试注册新键，取消时回滚
-            self.hotkey.register(original)
+            self.hotkey.register(self._settings_original)
+        wants_update = bool(getattr(dlg, "wants_update", False))
+        dlg.deleteLater()
         if wants_update:
             # 设置已经关掉了，等这一帧结束后再开更新窗口
             QTimer.singleShot(0, self.show_update)
