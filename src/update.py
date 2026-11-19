@@ -340,6 +340,50 @@ def _token() -> str:
     return (os.environ.get("WOJIETU_GITHUB_TOKEN") or "").strip()
 
 
+def fetch_manifest_direct(timeout: float) -> bytes:
+    """原路：github.com 上的 latest 直链。一次请求，能通就最快。"""
+    req = urllib.request.Request(
+        MANIFEST_URL,
+        headers={"User-Agent": USER_AGENT, "Cache-Control": "no-cache"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return resp.read()
+
+
+def fetch_manifest_via_api(timeout: float) -> bytes:
+    """备用路：先问 API 要「最新版本」，再按附件地址把 latest.json 取下来。
+
+    为什么需要这一条：国内直连时 `github.com` 主站经常整个不可达 —— 连 302
+    都发不出来，请求就干等；而 `api.github.com` 和 `release-assets` 这两个域名
+    往往还能用（安装包能下载、检查更新却超时，就是这种组合）。
+
+    清单只能从 release 附件里取（它有签名），不能换成 API 的 release JSON。
+    API 返回的 `assets[].url` 带上 `Accept: application/octet-stream` 会 302
+    到 CDN 域名，正好绕开打不开的主站。内容一模一样，验签照常。
+    """
+    req = urllib.request.Request(
+        LATEST_API,
+        headers={"User-Agent": USER_AGENT,
+                 "Accept": "application/vnd.github+json",
+                 "Cache-Control": "no-cache"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        release = json.loads(resp.read().decode("utf-8", "replace"))
+
+    item = None
+    for asset in (release.get("assets") or []):
+        if str(asset.get("name") or "") == "latest.json":
+            item = asset
+            break
+    if item is None or not item.get("url"):
+        raise RuntimeError("最新版本里没有 latest.json 附件")
+
+    req2 = urllib.request.Request(
+        str(item["url"]),
+        headers={"User-Agent": USER_AGENT,
+                 "Accept": "application/octet-stream"})
+    with urllib.request.urlopen(req2, timeout=timeout) as resp:
+        return resp.read()
+
+
 def _pac_url() -> str:
     """系统「自动配置脚本（PAC）」的地址；没设置就返回空串。
 
@@ -614,25 +658,48 @@ class UpdateChecker(QObject):
         self._deliver(self.found, info)
 
     def _stdlib_fetch(self):
-        """主通道：在工作线程里取清单，取到就把字节交回主线程。
+        """主通道：两条路同时走，谁先拿到用谁。
+
+        - 直链：一次请求，github.com 能通时最快
+        - API ：主站不可达、只有 api / CDN 可达时，只有这条能救回来
+
+        必须并行。顺序试的话第一条要等到超时才轮到第二条，用户等的是两段时间；
+        并行时最坏只等最长的那条，最好就是最快的那条。
 
         这里只做网络，不碰定时器、不碰 QNetworkAccessManager ——
         那些对象属于主线程，跨线程用是崩程序的常见来源。
         """
         t0 = time.time()
-        try:
-            req = urllib.request.Request(
-                MANIFEST_URL,
-                headers={"User-Agent": USER_AGENT, "Cache-Control": "no-cache"})
-            with urllib.request.urlopen(req, timeout=max(8, self._timeout_s + 2)) as resp:
-                data = resp.read()
-        except Exception as e:
-            # 不在这里报错：兜底通道可能马上就有结果，判死留给总超时。
-            ulog("主通道失败（%.1fs）：%s: %s"
-                 % (time.time() - t0, type(e).__name__, e))
-            return
-        ulog("主通道拿到清单（%.1fs，%d 字节）" % (time.time() - t0, len(data)))
-        self._raw.emit(data)
+        got = []
+        lock = threading.Lock()
+
+        def run(fn, label, budget):
+            try:
+                data = fn(budget)
+            except Exception as e:
+                ulog("%s失败（%.1fs）：%s: %s"
+                     % (label, time.time() - t0, type(e).__name__, e))
+                return
+            with lock:
+                if got:                 # 另一条先成功了，这条的结果直接丢
+                    return
+                got.append(data)
+            ulog("%s拿到清单（%.1fs，%d 字节）"
+                 % (label, time.time() - t0, len(data)))
+            self._raw.emit(data)
+
+        budget = max(6, self._timeout_s)
+        workers = [
+            threading.Thread(target=run, daemon=True,
+                             args=(fetch_manifest_direct, "直连",
+                                   min(5, budget))),
+            threading.Thread(target=run, daemon=True,
+                             args=(fetch_manifest_via_api, "API ", budget)),
+        ]
+        for w in workers:
+            w.start()
+        for w in workers:
+            w.join(budget + 3)
 
 
 
