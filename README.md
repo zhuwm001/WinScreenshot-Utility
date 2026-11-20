@@ -5,7 +5,7 @@
 
 ![主界面](docs/screenshot.png)
 
-**[下载最新版](https://github.com/zhuwm001/WinScreenshot-Utility/releases/latest)**
+**[下载最新版](https://github.com/tiamma46/WinScreenshot-Utility/releases/latest)**
 
 ## 功能
 
@@ -21,7 +21,7 @@
 
 ## 下载与安装
 
-1. 打开 [Releases](https://github.com/zhuwm001/WinScreenshot-Utility/releases/latest)，
+1. 打开 [Releases](https://github.com/tiamma46/WinScreenshot-Utility/releases/latest)，
    下载 `WoAiJieTu-Setup-v*.exe`
 2. 双击安装。装到当前用户目录（`%LOCALAPPDATA%\Programs\我爱截图`），**不需要管理员权限**
 3. 装完自动启动，桌面右下角出现图标
@@ -111,7 +111,7 @@
 
 ## 反馈
 
-遇到问题或有建议，欢迎在 [Issues](https://github.com/zhuwm001/WinScreenshot-Utility/issues) 里提出，
+遇到问题或有建议，欢迎在 [Issues](https://github.com/tiamma46/WinScreenshot-Utility/issues) 里提出，
 请附上系统版本和复现步骤。
 
 ## 许可

@@ -2,7 +2,7 @@
 ; 编译： "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer.iss
 
 #define MyAppName "我爱截图"
-#define MyAppVersion "1.3.4"
+#define MyAppVersion "1.3.5"
 #define MyAppExeName "我爱截图.exe"
 #define MyAppPublisher "WoAiJieTu"
 

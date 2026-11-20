@@ -35,7 +35,7 @@ FAKE_RELEASE = {
     "tag_name": "v1.1.0",
     "name": "我爱截图 v1.1.0",
     "body": "### 更新内容\n\n- 修复副屏黑块 [#12](https://x/12) (a1b2c3d)\n**重点** 优化",
-    "html_url": "https://github.com/zhuwm001/WinScreenshot-Utility/releases/tag/v1.1.0",
+    "html_url": "https://github.com/tiamma46/WinScreenshot-Utility/releases/tag/v1.1.0",
     "published_at": "2026-11-15T13:20:00Z",
     "assets": [
         {"name": "checksums.zip", "size": 1234,

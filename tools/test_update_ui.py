@@ -47,7 +47,7 @@ def fake_info():
         title="我爱截图 v1.1.0",
         notes="",
         notes_text="· 修复双显示器副屏截成黑块\n· 新增自动更新，装完自动重开\n· 更新说明支持长文本滚动",
-        page_url="https://github.com/zhuwm001/WinScreenshot-Utility/releases/tag/v1.1.0",
+        page_url="https://github.com/tiamma46/WinScreenshot-Utility/releases/tag/v1.1.0",
         asset_name="我爱截图_安装包_v1.1.0.exe",
         asset_url="https://x/setup.exe",
         asset_size=29000000,

@@ -151,7 +151,7 @@ def main():
 
     print("\n== 地址坏掉时要说人话 ==")
     old = up.MANIFEST_URL
-    up.MANIFEST_URL = "https://github.com/zhuwm001/WinScreenshot-Utility/releases/latest/download/nope.json"
+    up.MANIFEST_URL = "https://github.com/tiamma46/WinScreenshot-Utility/releases/latest/download/nope.json"
     try:
         r3 = run_check(APP_VERSION, timeout_ms=15000)
     finally:

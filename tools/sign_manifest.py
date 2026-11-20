@@ -65,7 +65,7 @@ def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--exe", required=True, help="安装包路径")
     ap.add_argument("--version", required=True, help="版本号，如 1.1.1")
-    ap.add_argument("--repo", default="zhuwm001/WinScreenshot-Utility")
+    ap.add_argument("--repo", default="tiamma46/WinScreenshot-Utility")
     ap.add_argument("--tag", default="", help="默认 v<version>")
     ap.add_argument("--notes", default="", help="更新说明文件（markdown）")
     ap.add_argument("--out", default="dist/latest.json")

@@ -228,7 +228,7 @@ class UpdateDialog(QDialog):
 
     def _open_page(self):
         url = (self.info.page_url if self.info else "") or \
-              "https://github.com/zhuwm001/WinScreenshot-Utility/releases/latest"
+              "https://github.com/tiamma46/WinScreenshot-Utility/releases/latest"
         QDesktopServices.openUrl(QUrl(url))
 
     def _on_primary(self):

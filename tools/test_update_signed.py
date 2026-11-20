@@ -34,7 +34,10 @@ import manifest                                     # noqa: E402
 import update                                       # noqa: E402
 
 PASS = FAIL = 0
-SAMPLE = os.path.join(HERE, "latest.manifest.sample.json")     # 提交进仓库的线上清单快照
+# 线上清单的签名快照。签名覆盖整份 payload，**不要手改里面的仓库名/地址**：
+# 改一个字节验签就会失败。换 GitHub 用户名后旧地址由 GitHub 301 重定向过去，
+# 这份快照照常能验，不需要跟着改。
+SAMPLE = os.path.join(HERE, "latest.manifest.sample.json")
 FALLBACK = os.path.join(ROOT, "build", "_man.json")           # 快照缺失时从线上抓
 
 

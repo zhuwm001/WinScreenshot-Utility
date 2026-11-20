@@ -45,7 +45,7 @@ PUB = ed25519.public_key(SEED).hex()
 def signed_doc(version="9.9.9", **kw):
     payload = {
         "schema": 1,
-        "repo": "zhuwm001/WinScreenshot-Utility",
+        "repo": "tiamma46/WinScreenshot-Utility",
         "version": version,
         "tag": "v" + version,
         "published_at": "2026-11-17T03:00:00Z",
@@ -54,7 +54,7 @@ def signed_doc(version="9.9.9", **kw):
             "name": "WoAiJieTu-Setup-v%s.exe" % version,
             "size": 28948431,
             "sha256": "a" * 64,
-            "url": ("https://github.com/zhuwm001/WinScreenshot-Utility/releases/"
+            "url": ("https://github.com/tiamma46/WinScreenshot-Utility/releases/"
                     "download/v%s/WoAiJieTu-Setup-v%s.exe" % (version, version)),
         },
     }

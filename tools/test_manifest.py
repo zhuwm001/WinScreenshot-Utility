@@ -30,7 +30,7 @@ def check(name, ok, detail=""):
 def make_payload(version="9.9.9", **over):
     p = {
         "schema": 1,
-        "repo": "zhuwm001/WinScreenshot-Utility",
+        "repo": "tiamma46/WinScreenshot-Utility",
         "version": version,
         "tag": "v" + version,
         "published_at": "2026-11-16T00:00:00Z",
@@ -39,7 +39,7 @@ def make_payload(version="9.9.9", **over):
             "name": "WoAiJieTu-Setup-v%s.exe" % version,
             "size": 27812824,
             "sha256": "a" * 64,
-            "url": ("https://github.com/zhuwm001/WinScreenshot-Utility/releases/"
+            "url": ("https://github.com/tiamma46/WinScreenshot-Utility/releases/"
                     "download/v%s/WoAiJieTu-Setup-v%s.exe" % (version, version)),
         },
     }

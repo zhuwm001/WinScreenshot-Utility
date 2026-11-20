@@ -33,7 +33,7 @@ from update_log import log as ulog
 
 # ---------------------------------------------------------------- 常量
 # 只改这一行就能换仓库
-REPO = "zhuwm001/WinScreenshot-Utility"
+REPO = "tiamma46/WinScreenshot-Utility"
 API_ROOT = "https://api.github.com"
 LATEST_API = "%s/repos/%s/releases/latest" % (API_ROOT, REPO)
 # 永远指向「最新那个 Release」上的同名附件，不用先查 API 拿 id
